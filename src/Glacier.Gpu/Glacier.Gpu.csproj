@@ -7,5 +7,22 @@
     <LangVersion>preview</LangVersion>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);CS1591;CS8981</NoWarn>
+
+    <!-- NuGet Package Properties -->
+    <PackageId>Glacier.Gpu</PackageId>
+    <Version>1.0.0</Version>
+    <Authors>Ian Cowley</Authors>
+    <Company>Glacier High-Performance Ecosystem</Company>
+    <Description>Heterogeneous Bare-Metal GPU Compute Engine in C# .NET 10. Bypasses CUDA runtime to execute raw SASS machine code, persistent ring buffer megakernels (&lt;350ns dispatch), and AMD RDNA 3.5 zero-copy APU unified memory.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/ian-cowley/Glacier.Gpu</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/ian-cowley/Glacier.Gpu.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>gpu;cuda;sass;rocm;hip;rdna;bare-metal;ring-buffer;high-performance;simd;net10;glacier</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
 </Project>
