@@ -1,0 +1,355 @@
+using System;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Threading;
+using Glacier.Gpu.Common;
+using Glacier.Gpu.Compilation;
+using Glacier.Gpu.Drivers;
+using Glacier.Gpu.RingBuffer;
+
+namespace Glacier.Gpu.Engines;
+
+/// <summary>
+/// Hardware engine for NVIDIA GPUs (Ada Lovelace, Ampere, Turing).
+/// Bypasses CUDA runtime to execute raw SASS machine code and persistent ring buffer workers.
+/// </summary>
+public sealed unsafe class NvidiaSassEngine : IGpuEngine
+{
+    private IntPtr _ctx;
+    private IntPtr _modAdd;
+    private IntPtr _modFma;
+    private IntPtr _modWorker;
+    private IntPtr _fnVectorAdd;
+    private IntPtr _fnVectorFma;
+    private IntPtr _fnWorker;
+    private PersistentRingBuffer? _ringBuffer;
+    private GpuDeviceInfo? _deviceInfo;
+    private bool _initialized;
+    private bool _disposed;
+
+    public GpuDeviceInfo DeviceInfo => _deviceInfo ?? throw new InvalidOperationException("Engine not initialized.");
+    public bool IsInitialized => _initialized && !_disposed;
+    public PersistentRingBuffer? RingBuffer => _ringBuffer;
+    public IntPtr ContextHandle => _ctx;
+
+    public void Initialize()
+    {
+        if (!CuDriver.IsAvailable())
+            throw new PlatformNotSupportedException("NVIDIA CUDA driver (nvcuda.dll) is not available on this system.");
+
+        CuDriver.Check(CuDriver.Init(0), "cuInit");
+        CuDriver.Check(CuDriver.DeviceGetCount(out int count), "cuDeviceGetCount");
+        if (count == 0)
+            throw new InvalidOperationException("No CUDA-capable GPU devices found.");
+
+        CuDriver.Check(CuDriver.DeviceGet(out int dev, 0), "cuDeviceGet");
+        string devName = CuDriver.GetDeviceName(dev);
+        string arch = CuDriver.GetComputeCapability(dev);
+        int smCount = CuDriver.GetMultiprocessorCount(dev);
+        CuDriver.Check(CuDriver.DeviceTotalMem(out nuint totalMem, dev), "cuDeviceTotalMem");
+
+        _deviceInfo = new GpuDeviceInfo(
+            DeviceName: devName,
+            DeviceType: GpuDeviceType.NvidiaDiscrete,
+            Architecture: arch,
+            ComputeUnitsOrSms: smCount,
+            TotalMemoryBytes: (long)totalMem,
+            IsUnifiedMemory: false,
+            SupportsPersistentRingBuffer: true
+        );
+
+        CuDriver.Check(CuDriver.CtxCreate(out _ctx, 0, dev), "cuCtxCreate");
+        CuDriver.CtxSetCurrent(_ctx);
+
+        // Load or JIT compile kernels
+        byte[] cubinAdd = KernelCache.GetOrCompile(arch, "VectorAdd", KernelSources.VectorAddPtx);
+        byte[] cubinFma = KernelCache.GetOrCompile(arch, "VectorFma", KernelSources.VectorFmaPtx);
+        byte[] cubinWorker = KernelCache.GetOrCompile(arch, "PersistentWorker", KernelSources.PersistentWorkerPtx);
+
+        CuDriver.Check(CuDriver.ModuleLoadData(out _modAdd, cubinAdd), "cuModuleLoadData(VectorAdd)");
+        CuDriver.Check(CuDriver.ModuleGetFunction(out _fnVectorAdd, _modAdd, "vector_add"), "cuModuleGetFunction(vector_add)");
+
+        CuDriver.Check(CuDriver.ModuleLoadData(out _modFma, cubinFma), "cuModuleLoadData(VectorFma)");
+        CuDriver.Check(CuDriver.ModuleGetFunction(out _fnVectorFma, _modFma, "vector_fma_benchmark"), "cuModuleGetFunction(vector_fma)");
+
+        CuDriver.Check(CuDriver.ModuleLoadData(out _modWorker, cubinWorker), "cuModuleLoadData(PersistentWorker)");
+        CuDriver.Check(CuDriver.ModuleGetFunction(out _fnWorker, _modWorker, "persistent_ring_worker"), "cuModuleGetFunction(persistent_worker)");
+
+        _initialized = true;
+    }
+
+    /// <summary>
+    /// Allocates host-pinned device-mapped memory block.
+    /// </summary>
+    public UnifiedMemoryBlock<T> AllocateUnifiedMemory<T>(int count) where T : unmanaged
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        CuDriver.CtxSetCurrent(_ctx);
+
+        nuint bytes = (nuint)(count * sizeof(T));
+        CuDriver.Check(CuDriver.MemHostAlloc(
+            out IntPtr hostPtr, 
+            bytes, 
+            CuDriver.CU_MEMHOSTALLOC_DEVICEMAP | CuDriver.CU_MEMHOSTALLOC_PORTABLE), 
+            "cuMemHostAlloc");
+
+        CuDriver.Check(CuDriver.MemHostGetDevicePointer(out IntPtr devPtr, hostPtr, 0), "cuMemHostGetDevicePointer");
+
+        return new UnifiedMemoryBlock<T>(hostPtr, devPtr, count, p => CuDriver.MemFreeHost(p));
+    }
+
+    /// <summary>
+    /// Measures traditional OS driver kernel launch latency via cuLaunchKernel (nvcuda.dll).
+    /// Typically 8 - 12 microseconds due to OS kernel driver submission overhead.
+    /// </summary>
+    public double MeasureTraditionalLaunchLatency(int iterations = 100_000)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        CuDriver.CtxSetCurrent(_ctx);
+        int N = 1024;
+        nuint bytes = (nuint)(N * sizeof(float));
+
+        CuDriver.Check(CuDriver.MemAlloc(out IntPtr d_a, bytes), "cuMemAlloc");
+        CuDriver.Check(CuDriver.MemAlloc(out IntPtr d_b, bytes), "cuMemAlloc");
+        CuDriver.Check(CuDriver.MemAlloc(out IntPtr d_c, bytes), "cuMemAlloc");
+
+        IntPtr[] kernelParams = new IntPtr[4];
+        GCHandle hParam0 = GCHandle.Alloc(d_a, GCHandleType.Pinned);
+        GCHandle hParam1 = GCHandle.Alloc(d_b, GCHandleType.Pinned);
+        GCHandle hParam2 = GCHandle.Alloc(d_c, GCHandleType.Pinned);
+        GCHandle hParam3 = GCHandle.Alloc(N, GCHandleType.Pinned);
+
+        kernelParams[0] = hParam0.AddrOfPinnedObject();
+        kernelParams[1] = hParam1.AddrOfPinnedObject();
+        kernelParams[2] = hParam2.AddrOfPinnedObject();
+        kernelParams[3] = hParam3.AddrOfPinnedObject();
+        GCHandle hParamsArray = GCHandle.Alloc(kernelParams, GCHandleType.Pinned);
+        IntPtr pParams = hParamsArray.AddrOfPinnedObject();
+
+        // Warmup
+        CuDriver.LaunchKernel(_fnVectorAdd, 4, 1, 1, 256, 1, 1, 0, IntPtr.Zero, pParams, IntPtr.Zero);
+        CuDriver.CtxSynchronize();
+
+        var sw = Stopwatch.StartNew();
+        for (int i = 0; i < iterations; i++)
+        {
+            CuDriver.LaunchKernel(_fnVectorAdd, 4, 1, 1, 256, 1, 1, 0, IntPtr.Zero, pParams, IntPtr.Zero);
+        }
+        CuDriver.CtxSynchronize();
+        sw.Stop();
+
+        hParam0.Free();
+        hParam1.Free();
+        hParam2.Free();
+        hParam3.Free();
+        hParamsArray.Free();
+        CuDriver.MemFree(d_a);
+        CuDriver.MemFree(d_b);
+        CuDriver.MemFree(d_c);
+
+        return sw.Elapsed.TotalMicroseconds / iterations;
+    }
+
+    /// <summary>
+    /// Measures CPU-to-GPU fire-and-forget enqueue latency vs round-trip synchronous latency.
+    /// </summary>
+    public (double dispatchUs, double roundTripUs, bool verified, float sampleVal) MeasureRingBufferLatency(int iterations = 10_000)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        CuDriver.CtxSetCurrent(_ctx);
+        const int N = 256;
+        nuint bufferBytes = (nuint)(N * sizeof(float));
+
+        // Allocate task struct in Host-pinned, device-mapped memory
+        nuint taskBytes = (nuint)sizeof(GpuWorkTask);
+        CuDriver.Check(CuDriver.MemHostAlloc(
+            out IntPtr hostTaskPtr,
+            taskBytes,
+            CuDriver.CU_MEMHOSTALLOC_DEVICEMAP | CuDriver.CU_MEMHOSTALLOC_PORTABLE),
+            "cuMemHostAlloc");
+        CuDriver.Check(CuDriver.MemHostGetDevicePointer(out IntPtr devTaskPtr, hostTaskPtr, 0), "cuMemHostGetDevicePointer");
+
+        // Allocate data buffers
+        CuDriver.Check(CuDriver.MemAlloc(out IntPtr d_a, bufferBytes), "cuMemAlloc");
+        CuDriver.Check(CuDriver.MemAlloc(out IntPtr d_b, bufferBytes), "cuMemAlloc");
+        CuDriver.Check(CuDriver.MemAlloc(out IntPtr d_c, bufferBytes), "cuMemAlloc");
+
+        float[] initA = new float[N];
+        float[] initB = new float[N];
+        Array.Fill(initA, 10.0f);
+        Array.Fill(initB, 20.0f);
+
+        fixed (float* pA = initA, pB = initB)
+        {
+            CuDriver.MemcpyHtoD(d_a, (IntPtr)pA, bufferBytes);
+            CuDriver.MemcpyHtoD(d_b, (IntPtr)pB, bufferBytes);
+        }
+
+        _ringBuffer = new PersistentRingBuffer(hostTaskPtr, devTaskPtr);
+
+        GpuWorkTask* task = (GpuWorkTask*)hostTaskPtr;
+        task->TaskId = 0;
+        task->OpCode = (uint)TaskOpCode.Nop;
+        task->ElementCount = (uint)N;
+        task->Status = 1;
+        task->BufferA = (ulong)d_a;
+        task->BufferB = (ulong)d_b;
+        task->BufferC = (ulong)d_c;
+
+        // Launch the persistent worker kernel (1 block of 256 threads)
+        IntPtr[] launchParams = new IntPtr[1];
+        GCHandle hParam = GCHandle.Alloc(devTaskPtr, GCHandleType.Pinned);
+        launchParams[0] = hParam.AddrOfPinnedObject();
+        GCHandle hArray = GCHandle.Alloc(launchParams, GCHandleType.Pinned);
+
+        CuDriver.Check(CuDriver.LaunchKernel(
+            _fnWorker,
+            1, 1, 1,
+            (uint)N, 1, 1,
+            0, IntPtr.Zero,
+            hArray.AddrOfPinnedObject(),
+            IntPtr.Zero), "LaunchKernel(PersistentWorker)");
+
+        Thread.Sleep(2); // Let worker spin up
+
+        // 1. Enqueue latency benchmark (CPU writing tasks to ring buffer)
+        var swEnqueue = Stopwatch.StartNew();
+        for (uint i = 1; i <= (uint)iterations; i++)
+        {
+            task->OpCode = (uint)TaskOpCode.VectorAdd;
+            Thread.MemoryBarrier();
+            task->TaskId = i;
+        }
+        swEnqueue.Stop();
+        double dispatchUs = swEnqueue.Elapsed.TotalMicroseconds / iterations;
+
+        // 2. Synchronous round-trip turnaround
+        int roundTripIters = Math.Min(5000, iterations);
+        var swRoundTrip = Stopwatch.StartNew();
+        for (uint i = 1; i <= (uint)roundTripIters; i++)
+        {
+            task->OpCode = (uint)TaskOpCode.VectorAdd;
+            task->Status = 0;
+            Thread.MemoryBarrier();
+            task->TaskId = 100_000 + i;
+
+            while (task->Status == 0)
+            {
+                Thread.SpinWait(1);
+            }
+        }
+        swRoundTrip.Stop();
+        double roundTripUs = swRoundTrip.Elapsed.TotalMicroseconds / roundTripIters;
+
+        // Shutdown worker
+        task->OpCode = (uint)TaskOpCode.Shutdown;
+        task->TaskId++;
+        Thread.MemoryBarrier();
+        CuDriver.CtxSynchronize();
+
+        // Verify result
+        float[] result = new float[N];
+        fixed (float* pR = result)
+        {
+            CuDriver.MemcpyDtoH((IntPtr)pR, d_c, bufferBytes);
+        }
+        float sampleVal = result[0];
+        bool verified = Math.Abs(sampleVal - 30.0f) < 0.001f;
+
+        // Cleanup
+        hParam.Free();
+        hArray.Free();
+        CuDriver.MemFree(d_a);
+        CuDriver.MemFree(d_b);
+        CuDriver.MemFree(d_c);
+        CuDriver.MemFreeHost(hostTaskPtr);
+        _ringBuffer = null;
+
+        return (dispatchUs, roundTripUs, verified, sampleVal);
+    }
+
+    /// <summary>
+    /// Executes SASS FMA unrolled compute benchmark.
+    /// </summary>
+    public (double tflops, double latencyMs) BenchmarkFmaCompute(int N = 4_194_304, int loopCount = 200)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        CuDriver.CtxSetCurrent(_ctx);
+        nuint bytes = (nuint)(N * sizeof(float));
+
+        CuDriver.Check(CuDriver.MemAlloc(out IntPtr d_a, bytes), "cuMemAlloc");
+        CuDriver.Check(CuDriver.MemAlloc(out IntPtr d_b, bytes), "cuMemAlloc");
+        CuDriver.Check(CuDriver.MemAlloc(out IntPtr d_c, bytes), "cuMemAlloc");
+
+        IntPtr[] kernelParams = new IntPtr[5];
+        GCHandle hParam0 = GCHandle.Alloc(d_a, GCHandleType.Pinned);
+        GCHandle hParam1 = GCHandle.Alloc(d_b, GCHandleType.Pinned);
+        GCHandle hParam2 = GCHandle.Alloc(d_c, GCHandleType.Pinned);
+        GCHandle hParam3 = GCHandle.Alloc(N, GCHandleType.Pinned);
+        GCHandle hParam4 = GCHandle.Alloc(loopCount, GCHandleType.Pinned);
+
+        kernelParams[0] = hParam0.AddrOfPinnedObject();
+        kernelParams[1] = hParam1.AddrOfPinnedObject();
+        kernelParams[2] = hParam2.AddrOfPinnedObject();
+        kernelParams[3] = hParam3.AddrOfPinnedObject();
+        kernelParams[4] = hParam4.AddrOfPinnedObject();
+        GCHandle hArray = GCHandle.Alloc(kernelParams, GCHandleType.Pinned);
+
+        // Warmup
+        CuDriver.LaunchKernel(_fnVectorFma, (uint)(N / 256), 1, 1, 256, 1, 1, 0, IntPtr.Zero, hArray.AddrOfPinnedObject(), IntPtr.Zero);
+        CuDriver.CtxSynchronize();
+
+        int iters = 20;
+        var sw = Stopwatch.StartNew();
+        for (int i = 0; i < iters; i++)
+        {
+            CuDriver.LaunchKernel(_fnVectorFma, (uint)(N / 256), 1, 1, 256, 1, 1, 0, IntPtr.Zero, hArray.AddrOfPinnedObject(), IntPtr.Zero);
+        }
+        CuDriver.CtxSynchronize();
+        sw.Stop();
+
+        hParam0.Free();
+        hParam1.Free();
+        hParam2.Free();
+        hParam3.Free();
+        hParam4.Free();
+        hArray.Free();
+
+        CuDriver.MemFree(d_a);
+        CuDriver.MemFree(d_b);
+        CuDriver.MemFree(d_c);
+
+        double totalSecs = sw.Elapsed.TotalSeconds;
+        double avgMs = sw.Elapsed.TotalMilliseconds / iters;
+        double fmaOpsPerThread = (double)loopCount * 8.0 * 2.0;
+        double totalFlops = (double)N * fmaOpsPerThread * iters;
+        double tflops = (totalFlops / totalSecs) / 1e12;
+
+        return (tflops, avgMs);
+    }
+
+    public void Synchronize()
+    {
+        if (_ctx != IntPtr.Zero)
+        {
+            CuDriver.CtxSetCurrent(_ctx);
+            CuDriver.CtxSynchronize();
+        }
+    }
+
+    public void Dispose()
+    {
+        if (!_disposed)
+        {
+            _disposed = true;
+            _ringBuffer?.Dispose();
+            _ringBuffer = null;
+
+            if (_ctx != IntPtr.Zero)
+            {
+                CuDriver.CtxDestroy(_ctx);
+                _ctx = IntPtr.Zero;
+            }
+        }
+    }
+}

@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Glacier.Gpu/Glacier.Gpu.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Glacier.Gpu.Tests/Glacier.Gpu.Tests.csproj" />
+  </Folder>
+  <Folder Name="/benchmarks/">
+    <Project Path="benchmarks/Glacier.Gpu.Benchmarks/Glacier.Gpu.Benchmarks.csproj" />
+  </Folder>
+  <Folder Name="/samples/">
+    <Project Path="samples/Glacier.Gpu.Demo/Glacier.Gpu.Demo.csproj" />
+  </Folder>
+</Solution>
