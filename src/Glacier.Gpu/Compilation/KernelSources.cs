@@ -69,7 +69,7 @@ DONE:
     .reg .pred %p0, %p1;
     .reg .b32 %r0, %r1, %r2, %i, %loops;
     .reg .b64 %rd<8>;
-    .reg .f32 %f0, %f1, %f2, %f3, %f4, %f5, %f6;
+    .reg .f32 %f0, %f1, %f2, %f3, %f4, %f5, %f6, %f7, %f8, %f9, %f_scaleA, %f_scaleB;
 
     mov.u32 %r0, %ctaid.x;
     mov.u32 %r1, %ntid.x;
@@ -93,29 +93,43 @@ DONE:
 
     mov.f32 %f2, %f0;
     mov.f32 %f3, %f1;
-    mov.f32 %f4, 1.00001;
-    mov.f32 %f5, 0.99999;
+    mov.f32 %f4, %f0;
+    mov.f32 %f5, %f1;
+    mov.f32 %f6, %f0;
+    mov.f32 %f7, %f1;
+    mov.f32 %f8, %f0;
+    mov.f32 %f9, %f1;
+
+    mov.f32 %f_scaleA, 1.00001;
+    mov.f32 %f_scaleB, 0.99999;
 
     ld.param.u32 %loops, [loop_count];
     mov.u32 %i, 0;
 
 LOOP:
-    fma.rn.f32 %f2, %f2, %f4, %f3;
-    fma.rn.f32 %f3, %f3, %f5, %f2;
-    fma.rn.f32 %f2, %f2, %f4, %f3;
-    fma.rn.f32 %f3, %f3, %f5, %f2;
-    fma.rn.f32 %f2, %f2, %f4, %f3;
-    fma.rn.f32 %f3, %f3, %f5, %f2;
-    fma.rn.f32 %f2, %f2, %f4, %f3;
-    fma.rn.f32 %f3, %f3, %f5, %f2;
+    fma.rn.f32 %f2, %f2, %f_scaleA, %f3;
+    fma.rn.f32 %f4, %f4, %f_scaleB, %f5;
+    fma.rn.f32 %f6, %f6, %f_scaleA, %f7;
+    fma.rn.f32 %f8, %f8, %f_scaleB, %f9;
+    fma.rn.f32 %f3, %f3, %f_scaleA, %f2;
+    fma.rn.f32 %f5, %f5, %f_scaleB, %f4;
+    fma.rn.f32 %f7, %f7, %f_scaleA, %f6;
+    fma.rn.f32 %f9, %f9, %f_scaleB, %f8;
     add.u32 %i, %i, 1;
     setp.lt.u32 %p1, %i, %loops;
     @%p1 bra LOOP;
 
-    add.f32 %f6, %f2, %f3;
+    add.f32 %f2, %f2, %f3;
+    add.f32 %f4, %f4, %f5;
+    add.f32 %f6, %f6, %f7;
+    add.f32 %f8, %f8, %f9;
+    add.f32 %f2, %f2, %f4;
+    add.f32 %f6, %f6, %f8;
+    add.f32 %f0, %f2, %f6;
+
     ld.param.u64 %rd7, [d_c];
     add.s64 %rd7, %rd7, %rd2;
-    st.global.f32 [%rd7], %f6;
+    st.global.f32 [%rd7], %f0;
 
 DONE:
     ret;

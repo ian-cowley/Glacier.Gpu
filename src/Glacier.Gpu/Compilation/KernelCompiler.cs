@@ -37,6 +37,11 @@ public static class KernelCompiler
     /// </summary>
     public static byte[] CompileOrPreparePtx(string ptxCode, string targetArch = "sm_89")
     {
+        if (!string.IsNullOrWhiteSpace(targetArch) && targetArch.StartsWith("sm_"))
+        {
+            ptxCode = System.Text.RegularExpressions.Regex.Replace(ptxCode, @"\.target\s+sm_\d+", $".target {targetArch}");
+        }
+
         string? ptxas = LocatePtxas();
         if (ptxas == null)
         {

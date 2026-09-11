@@ -22,6 +22,11 @@ public static class KernelCache
         string archDir = Path.Combine(CacheBaseDir, targetArch);
         Directory.CreateDirectory(archDir);
 
+        if (!string.IsNullOrWhiteSpace(targetArch) && targetArch.StartsWith("sm_"))
+        {
+            ptxSource = System.Text.RegularExpressions.Regex.Replace(ptxSource, @"\.target\s+sm_\d+", $".target {targetArch}");
+        }
+
         using var sha = SHA256.Create();
         string hash = Convert.ToHexString(sha.ComputeHash(Encoding.UTF8.GetBytes(ptxSource)))[..16];
         string cacheFile = Path.Combine(archDir, $"{kernelName}_{hash}.cubin");
