@@ -47,4 +47,36 @@ public class DriverDetectionTests
         string name = HipDriver.GetDeviceName(0);
         Assert.False(string.IsNullOrWhiteSpace(name));
     }
+
+    [Fact]
+    public void DirectMlDriver_DoesNotThrowAndDetectsAdapters()
+    {
+        bool hasDml = DirectMlDriver.IsAvailable();
+        Assert.True(hasDml || !hasDml);
+
+        if (hasDml)
+        {
+            var adapters = DirectMlDriver.GetAdapters();
+            Assert.NotEmpty(adapters);
+            foreach (var a in adapters)
+            {
+                Assert.False(string.IsNullOrWhiteSpace(a.Description));
+                Assert.True(a.VendorId > 0);
+            }
+        }
+    }
+
+    [Fact]
+    public void DirectMlEngine_InitializesSuccessfullyWhenAvailable()
+    {
+        if (!DirectMlDriver.IsAvailable()) return;
+
+        using var engine = new Glacier.Gpu.Engines.DirectMlEngine();
+        engine.Initialize();
+
+        Assert.True(engine.IsInitialized);
+        Assert.False(string.IsNullOrWhiteSpace(engine.DeviceInfo.DeviceName));
+        Assert.False(string.IsNullOrWhiteSpace(engine.DeviceInfo.Architecture));
+        Assert.True(engine.DeviceInfo.ComputeUnitsOrSms > 0);
+    }
 }

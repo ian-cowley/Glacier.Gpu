@@ -31,16 +31,33 @@ public sealed unsafe class AmdRdnaEngine : IGpuEngine
         string devName = HipDriver.GetDeviceName(0);
         HipDriver.Check(HipDriver.SetDevice(0), "hipSetDevice");
 
-        bool isApu = devName.Contains("Radeon", StringComparison.OrdinalIgnoreCase) || 
-                     devName.Contains("Graphics", StringComparison.OrdinalIgnoreCase) ||
-                     devName.Contains("890M", StringComparison.OrdinalIgnoreCase);
+        string lowerName = devName.ToLowerInvariant();
+        bool isApu = lowerName.Contains("890m") || lowerName.Contains("880m") ||
+                     lowerName.Contains("780m") || lowerName.Contains("760m") ||
+                     lowerName.Contains("680m") || lowerName.Contains("660m") ||
+                     lowerName.Contains("graphics") || lowerName.Contains("apu");
+
+        string arch;
+        if (lowerName.Contains("890m") || lowerName.Contains("880m"))
+            arch = "RDNA 3.5 (gfx1150)";
+        else if (lowerName.Contains("780m") || lowerName.Contains("760m") || lowerName.Contains("740m") ||
+                 lowerName.Contains("7900") || lowerName.Contains("7800") || lowerName.Contains("7700") || lowerName.Contains("7600"))
+            arch = "RDNA 3.0 (gfx1103)";
+        else if (lowerName.Contains("680m") || lowerName.Contains("660m") ||
+                 lowerName.Contains("6900") || lowerName.Contains("6800") || lowerName.Contains("6700") || lowerName.Contains("6600"))
+            arch = "RDNA 2.0 (gfx1035)";
+        else
+            arch = isApu ? "RDNA APU" : "RDNA dGPU";
+
+        int cuCount = HipDriver.GetMultiprocessorCount(0);
+        long totalMem = (long)HipDriver.GetTotalMemory(0);
 
         _deviceInfo = new GpuDeviceInfo(
             DeviceName: devName,
             DeviceType: isApu ? GpuDeviceType.AmdIntegratedApu : GpuDeviceType.AmdDiscrete,
-            Architecture: "RDNA 3.5 (gfx1150)",
-            ComputeUnitsOrSms: 16,
-            TotalMemoryBytes: 12L * 1024 * 1024 * 1024, // 12 GB Unified RAM
+            Architecture: arch,
+            ComputeUnitsOrSms: cuCount,
+            TotalMemoryBytes: totalMem,
             IsUnifiedMemory: isApu,
             SupportsPersistentRingBuffer: false
         );

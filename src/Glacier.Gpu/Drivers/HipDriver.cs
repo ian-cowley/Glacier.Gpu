@@ -78,11 +78,56 @@ public static class HipDriver
     [DllImport(HipLib, EntryPoint = "hipStreamDestroy")]
     public static extern int StreamDestroy(IntPtr stream);
 
+    [DllImport(HipLib, EntryPoint = "hipDeviceGetAttribute")]
+    public static extern int DeviceGetAttribute(out int pi, int attr, int device);
+
+    [DllImport(HipLib, EntryPoint = "hipDeviceTotalMem")]
+    public static extern int DeviceTotalMem(out nuint bytes, int device);
+
+    public const int HIP_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT = 16;
+    public const int HIP_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR = 75;
+    public const int HIP_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR = 76;
+
     public static string GetDeviceName(int device)
     {
         var buf = new byte[256];
         DeviceGetName(buf, buf.Length, device);
         return Encoding.ASCII.GetString(buf).TrimEnd('\0');
+    }
+
+    public static int GetMultiprocessorCount(int device)
+    {
+        try
+        {
+            if (DeviceGetAttribute(out int count, HIP_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, device) == 0 && count > 0)
+                return count;
+        }
+        catch { }
+
+        // Fallback based on known device name
+        string name = GetDeviceName(device).ToLowerInvariant();
+        if (name.Contains("890m")) return 16;
+        if (name.Contains("880m") || name.Contains("780m") || name.Contains("680m")) return 12;
+        if (name.Contains("760m")) return 8;
+        if (name.Contains("660m")) return 6;
+        if (name.Contains("7900 xtx")) return 96;
+        if (name.Contains("7900 xt")) return 84;
+        if (name.Contains("7800")) return 60;
+        if (name.Contains("7700")) return 54;
+        if (name.Contains("7600")) return 32;
+        if (name.Contains("6900") || name.Contains("6800")) return 72;
+        return 12;
+    }
+
+    public static nuint GetTotalMemory(int device)
+    {
+        try
+        {
+            if (DeviceTotalMem(out nuint mem, device) == 0 && mem > 0)
+                return mem;
+        }
+        catch { }
+        return unchecked((nuint)(12L * 1024 * 1024 * 1024)); // Default 12 GB
     }
 
     public static void Check(int res, string op)
