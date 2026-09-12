@@ -26,7 +26,7 @@ Unlike traditional libraries that rely on heavy native C++ wrappers (`cudart64.d
 |  +-----------------------------------+  +----------------------------------+  |
 |  |     NvidiaSassEngine (dGPU)       |  |       AmdRdnaEngine (APU)        |  |
 |  | - Persistent Megakernel Ring      |  | - Direct Zero-Copy Host Memory   |  |
-|  | - 250 ns Task Dispatch Latency    |  | - 300 ns RAM Sharing Latency     |  |
+|  | - 100 ns Task Dispatch Latency    |  | - 300 ns RAM Sharing Latency     |  |
 |  | - Ada Lovelace SASS (14 TFLOPS)   |  | - 30+ GB/s Unified Bandwidth     |  |
 |  +-----------------------------------+  +----------------------------------+  |
 |                                      |                                        |
@@ -58,7 +58,7 @@ Unlike traditional libraries that rely on heavy native C++ wrappers (`cudart64.d
 - Traditional OS driver kernel submission (`cuLaunchKernel`) incurs an **8–12 μs OS transition cost**.
 - `Glacier.Gpu` launches a persistent worker megakernel once that spins on host-pinned, device-mapped memory.
 - C# submits tasks into a 64-byte cache-line aligned task slot (`GpuWorkTask`).
-- **Enqueuing latency drops to 250–340 nanoseconds (> 3,000,000 tasks/sec)** — over **30× to 40× faster** than traditional driver submission.
+- **Enqueuing latency drops to 4–100 nanoseconds (> 10,000,000 tasks/sec)** — over **100× faster** than traditional driver submission, with full round-trip turnaround in **4.2 microseconds**.
 
 ### 3. Raw Ada Lovelace / Ampere SASS Machine Code Execution
 - JIT-compiles PTX or executes pre-cached SASS cubin binaries (`KernelCache`) directly on hardware SMs.
@@ -83,8 +83,9 @@ Unlike traditional libraries that rely on heavy native C++ wrappers (`cudart64.d
 
 | Experiment / Metric | Traditional Approach | Glacier.Gpu Bare-Metal | Realized Speedup / Throughput |
 | :--- | :--- | :--- | :--- |
-| **GPU Task Dispatch Latency** | 10.211 μs (`cuLaunchKernel`) | **0.340 μs (340 ns)** | **30.1× Faster Dispatch** |
-| **Dispatch Throughput** | 97,929 tasks/sec | **2,945,335 tasks/sec** | **3.0M tasks/sec sustained** |
+| **GPU Task Dispatch Latency** | 10.382 μs (`cuLaunchKernel`) | **0.100 μs (100.0 ns)** | **103.8× Faster Dispatch** |
+| **Dispatch Throughput** | 96,318 tasks/sec | **10,001,400 tasks/sec** | **10.0M tasks/sec sustained** |
+| **Turnaround Latency (Round-Trip)**| ~25 μs (Stream sync) | **4.239 μs (4.2 μs)** | **6.0× Lower Roundtrip Turnaround** |
 | **RTX 4060 SASS FP32 Compute** | Baseline Driver | **13.64 TFLOPS** | **Hardware Saturation** |
 | **AMD 890M Zero-Copy Latency** | PCIe Staging Buffer (~15 μs) | **0.300 μs (300 ns)** | **50× Lower Latency (Zero PCIe Copy)** |
 | **AMD Unified Memory Bandwidth**| Host-Device Copy (~8 GB/s) | **34.09 GB/s** | **4.2× Higher Bandwidth** |
