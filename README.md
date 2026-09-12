@@ -208,6 +208,12 @@ dotnet run --project benchmarks/Glacier.Gpu.Benchmarks/Glacier.Gpu.Benchmarks.cs
 
 ---
 
+## Credits
+
+Developed by Ian Cowley and Antigravity (Google DeepMind).
+
+---
+
 ## 📜 License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
