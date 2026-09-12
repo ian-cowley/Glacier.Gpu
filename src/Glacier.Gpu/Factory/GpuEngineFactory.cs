@@ -11,9 +11,32 @@ namespace Glacier.Gpu.Factory;
 public static class GpuEngineFactory
 {
     public static bool HasNvidiaGpu => CuDriver.IsAvailable();
-    public static bool HasAmdGpu => HipDriver.IsAvailable();
+    public static bool HasAmdGpu => HipDriver.IsAvailable() || HasAmdD3D12;
     public static bool HasDirectMl => DirectMlDriver.IsAvailable();
     public static bool HasIntelGpu => DirectMlDriver.HasIntelGpu;
+    public static bool HasD3D12 => OperatingSystem.IsWindows();
+
+    public static bool HasAmdD3D12
+    {
+        get
+        {
+            if (!OperatingSystem.IsWindows()) return false;
+            try
+            {
+                using var f = Vortice.DXGI.DXGI.CreateDXGIFactory1<Vortice.DXGI.IDXGIFactory4>();
+                for (uint i = 0; f.EnumAdapters1(i, out Vortice.DXGI.IDXGIAdapter1 a).Success; i++)
+                {
+                    var desc = a.Description1;
+                    bool isAmd = (desc.Flags & Vortice.DXGI.AdapterFlags.Software) == 0 &&
+                                 (desc.VendorId == 0x1002 || desc.Description.Contains("Radeon", StringComparison.OrdinalIgnoreCase));
+                    a.Dispose();
+                    if (isAmd) return true;
+                }
+                return false;
+            }
+            catch { return false; }
+        }
+    }
 
     public static IGpuEngine CreateOptimalEngine()
     {
@@ -31,7 +54,14 @@ public static class GpuEngineFactory
             return nv;
         }
 
-        if (HasAmdGpu)
+        if (HasAmdD3D12)
+        {
+            var d3d = new D3D12ComputeEngine();
+            d3d.Initialize();
+            return d3d;
+        }
+
+        if (HasAmdGpu && HipDriver.IsAvailable())
         {
             var amd = new AmdRdnaEngine();
             amd.Initialize();
@@ -44,6 +74,13 @@ public static class GpuEngineFactory
             var dml = new DirectMlEngine();
             dml.Initialize();
             return dml;
+        }
+
+        if (HasD3D12)
+        {
+            var d3d = new D3D12ComputeEngine();
+            d3d.Initialize();
+            return d3d;
         }
 
         throw new PlatformNotSupportedException("No supported bare-metal GPU driver found on this system.");
@@ -64,14 +101,41 @@ public static class GpuEngineFactory
         }
     }
 
-    public static AmdRdnaEngine? TryCreateAmdEngine()
+    public static IGpuEngine? TryCreateAmdEngine()
     {
-        if (!HasAmdGpu) return null;
+        if (HasAmdD3D12)
+        {
+            try
+            {
+                var d3d = new D3D12ComputeEngine();
+                d3d.Initialize();
+                return d3d;
+            }
+            catch { }
+        }
+
+        if (HipDriver.IsAvailable())
+        {
+            try
+            {
+                var amd = new AmdRdnaEngine();
+                amd.Initialize();
+                return amd;
+            }
+            catch { }
+        }
+
+        return null;
+    }
+
+    public static D3D12ComputeEngine? TryCreateD3D12Engine(int adapterIndex = -1)
+    {
+        if (!HasD3D12) return null;
         try
         {
-            var amd = new AmdRdnaEngine();
-            amd.Initialize();
-            return amd;
+            var d3d = new D3D12ComputeEngine(adapterIndex);
+            d3d.Initialize();
+            return d3d;
         }
         catch
         {

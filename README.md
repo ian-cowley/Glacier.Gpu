@@ -64,10 +64,10 @@ Unlike traditional libraries that rely on heavy native C++ wrappers (`cudart64.d
 - JIT-compiles PTX or executes pre-cached SASS cubin binaries (`KernelCache`) directly on hardware SMs.
 - Features unrolled fused multiply-add (FMA) execution loops saturating **13.6–14.0+ TFLOPS FP32** on mobile Ada Lovelace hardware.
 
-### 4. AMD Radeon RDNA 3.5 APU True Zero-Copy Unified Memory
-- Leverages AMD APU unified memory architecture sharing physical LPDDR5X RAM between CPU and GPU.
-- Allocates zero-copy memory via `hipHostMalloc` with `HIP_HOST_MALLOC_MAPPED`.
-- Zero PCIe transfer latency (**300 ns coherency**), streaming data at **30+ GB/s** sustained bandwidth directly from C# `Span<T>`.
+### 4. AMD Radeon RDNA 2 / 3.5 APU Direct3D 12 & Zero-Copy Unified Memory (`D3D12ComputeEngine`)
+- Leverages Direct3D 12 Compute and AMD APU unified memory architecture sharing physical DDR5/LPDDR5X RAM between CPU and GPU.
+- Native HLSL Wave32 compute shaders with zero-allocation persistent buffers and fused reductions.
+- Zero PCIe transfer latency (**300 ns coherency**), streaming data at **30+ GB/s** sustained bandwidth directly from C# memory without external native C++ runtime binaries.
 
 ### 5. Heterogeneous Dual-GPU Concurrent Orchestration
 - Simultaneously fires parallel workloads across discrete NVIDIA dGPU (compute-dense matrix/tensor operations) and integrated AMD APU (streaming reductions, memory bandwidth sweeps) without thread contention.
