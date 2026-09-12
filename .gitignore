@@ -5,3 +5,5 @@ obj/
 .vs/
 TestResults/
 BenchmarkDotNet.Artifacts/
+PROJECT_SOURCE.md
+Glacier.Gpu.md

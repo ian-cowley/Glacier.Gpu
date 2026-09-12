@@ -23,6 +23,10 @@ public sealed unsafe class NvidiaSassEngine : IGpuEngine
     private IntPtr _fnVectorFma;
     private IntPtr _fnWorker;
     private PersistentRingBuffer? _ringBuffer;
+    private IntPtr _hostTaskPtr;
+    private IntPtr _devTaskPtr;
+    private GCHandle _hWorkerParam;
+    private GCHandle _hWorkerArray;
     private GpuDeviceInfo? _deviceInfo;
     private bool _initialized;
     private bool _disposed;
@@ -153,21 +157,57 @@ public sealed unsafe class NvidiaSassEngine : IGpuEngine
     /// <summary>
     /// Measures CPU-to-GPU fire-and-forget enqueue latency vs round-trip synchronous latency.
     /// </summary>
+    /// <summary>
+    /// Gets or initializes the persistent ring buffer worker on the GPU.
+    /// </summary>
+    public PersistentRingBuffer GetOrCreateRingBuffer(int threadCount = 256)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_ringBuffer != null && !_ringBuffer.IsDisposed)
+            return _ringBuffer;
+
+        CuDriver.CtxSetCurrent(_ctx);
+        nuint taskBytes = (nuint)sizeof(GpuWorkTask);
+        CuDriver.Check(CuDriver.MemHostAlloc(
+            out _hostTaskPtr,
+            taskBytes,
+            CuDriver.CU_MEMHOSTALLOC_DEVICEMAP | CuDriver.CU_MEMHOSTALLOC_PORTABLE),
+            "cuMemHostAlloc");
+        CuDriver.Check(CuDriver.MemHostGetDevicePointer(out _devTaskPtr, _hostTaskPtr, 0), "cuMemHostGetDevicePointer");
+
+        _ringBuffer = new PersistentRingBuffer(_hostTaskPtr, _devTaskPtr);
+
+        GpuWorkTask* task = (GpuWorkTask*)_hostTaskPtr;
+        task->TaskId = 0;
+        task->OpCode = (uint)TaskOpCode.Nop;
+        task->ElementCount = (uint)threadCount;
+        task->Status = 1;
+
+        IntPtr devTask = _devTaskPtr;
+        IntPtr* launchParams = stackalloc IntPtr[1];
+        launchParams[0] = (IntPtr)(&devTask);
+
+        CuDriver.Check(CuDriver.LaunchKernel(
+            _fnWorker,
+            1, 1, 1,
+            (uint)threadCount, 1, 1,
+            0, IntPtr.Zero,
+            (IntPtr)launchParams,
+            IntPtr.Zero), "LaunchKernel(PersistentWorker)");
+
+        Thread.Sleep(2); // Let worker spin up
+        return _ringBuffer;
+    }
+
+    /// <summary>
+    /// Measures CPU-to-GPU fire-and-forget enqueue latency vs round-trip synchronous latency.
+    /// </summary>
     public (double dispatchUs, double roundTripUs, bool verified, float sampleVal) MeasureRingBufferLatency(int iterations = 10_000)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         CuDriver.CtxSetCurrent(_ctx);
         const int N = 256;
         nuint bufferBytes = (nuint)(N * sizeof(float));
-
-        // Allocate task struct in Host-pinned, device-mapped memory
-        nuint taskBytes = (nuint)sizeof(GpuWorkTask);
-        CuDriver.Check(CuDriver.MemHostAlloc(
-            out IntPtr hostTaskPtr,
-            taskBytes,
-            CuDriver.CU_MEMHOSTALLOC_DEVICEMAP | CuDriver.CU_MEMHOSTALLOC_PORTABLE),
-            "cuMemHostAlloc");
-        CuDriver.Check(CuDriver.MemHostGetDevicePointer(out IntPtr devTaskPtr, hostTaskPtr, 0), "cuMemHostGetDevicePointer");
 
         // Allocate data buffers
         CuDriver.Check(CuDriver.MemAlloc(out IntPtr d_a, bufferBytes), "cuMemAlloc");
@@ -185,40 +225,23 @@ public sealed unsafe class NvidiaSassEngine : IGpuEngine
             CuDriver.MemcpyHtoD(d_b, (IntPtr)pB, bufferBytes);
         }
 
-        _ringBuffer = new PersistentRingBuffer(hostTaskPtr, devTaskPtr);
-
-        GpuWorkTask* task = (GpuWorkTask*)hostTaskPtr;
-        task->TaskId = 0;
-        task->OpCode = (uint)TaskOpCode.Nop;
+        PersistentRingBuffer ring = GetOrCreateRingBuffer(N);
+        GpuWorkTask* task = (GpuWorkTask*)ring.HostTaskPointer;
         task->ElementCount = (uint)N;
-        task->Status = 1;
         task->BufferA = (ulong)d_a;
         task->BufferB = (ulong)d_b;
         task->BufferC = (ulong)d_c;
-
-        // Launch the persistent worker kernel (1 block of 256 threads)
-        IntPtr[] launchParams = new IntPtr[1];
-        GCHandle hParam = GCHandle.Alloc(devTaskPtr, GCHandleType.Pinned);
-        launchParams[0] = hParam.AddrOfPinnedObject();
-        GCHandle hArray = GCHandle.Alloc(launchParams, GCHandleType.Pinned);
-
-        CuDriver.Check(CuDriver.LaunchKernel(
-            _fnWorker,
-            1, 1, 1,
-            (uint)N, 1, 1,
-            0, IntPtr.Zero,
-            hArray.AddrOfPinnedObject(),
-            IntPtr.Zero), "LaunchKernel(PersistentWorker)");
-
-        Thread.Sleep(2); // Let worker spin up
 
         // 1. Enqueue latency benchmark (CPU writing tasks to ring buffer)
         var swEnqueue = Stopwatch.StartNew();
         for (uint i = 1; i <= (uint)iterations; i++)
         {
             task->OpCode = (uint)TaskOpCode.VectorAdd;
-            Thread.MemoryBarrier();
-            task->TaskId = i;
+            if (System.Runtime.Intrinsics.X86.Sse.IsSupported)
+                System.Runtime.Intrinsics.X86.Sse.StoreFence();
+            else
+                Thread.MemoryBarrier();
+            Volatile.Write(ref task->TaskId, i);
         }
         swEnqueue.Stop();
         double dispatchUs = swEnqueue.Elapsed.TotalMicroseconds / iterations;
@@ -230,10 +253,13 @@ public sealed unsafe class NvidiaSassEngine : IGpuEngine
         {
             task->OpCode = (uint)TaskOpCode.VectorAdd;
             task->Status = 0;
-            Thread.MemoryBarrier();
-            task->TaskId = 100_000 + i;
+            if (System.Runtime.Intrinsics.X86.Sse.IsSupported)
+                System.Runtime.Intrinsics.X86.Sse.StoreFence();
+            else
+                Thread.MemoryBarrier();
+            Volatile.Write(ref task->TaskId, 100_000 + i);
 
-            while (task->Status == 0)
+            while (Volatile.Read(ref task->Status) == 0)
             {
                 Thread.SpinWait(1);
             }
@@ -241,28 +267,49 @@ public sealed unsafe class NvidiaSassEngine : IGpuEngine
         swRoundTrip.Stop();
         double roundTripUs = swRoundTrip.Elapsed.TotalMicroseconds / roundTripIters;
 
-        // Shutdown worker
+        // Verify VectorFma as well: C = A * 2.0f + B = 10 * 2 + 20 = 40
+        task->OpCode = (uint)TaskOpCode.VectorFma;
+        task->Scalar = 2.0f;
+        task->Status = 0;
+        if (System.Runtime.Intrinsics.X86.Sse.IsSupported)
+            System.Runtime.Intrinsics.X86.Sse.StoreFence();
+        else
+            Thread.MemoryBarrier();
+        Volatile.Write(ref task->TaskId, 200_001);
+
+        while (Volatile.Read(ref task->Status) == 0)
+        {
+            Thread.SpinWait(1);
+        }
+
+        // Shutdown worker before copying back device memory (MemcpyDtoH synchronizes stream)
         task->OpCode = (uint)TaskOpCode.Shutdown;
-        task->TaskId++;
-        Thread.MemoryBarrier();
+        if (System.Runtime.Intrinsics.X86.Sse.IsSupported)
+            System.Runtime.Intrinsics.X86.Sse.StoreFence();
+        else
+            Thread.MemoryBarrier();
+        Volatile.Write(ref task->TaskId, task->TaskId + 1);
         CuDriver.CtxSynchronize();
 
-        // Verify result
+        // Verify result after worker kernel shutdown
         float[] result = new float[N];
         fixed (float* pR = result)
         {
             CuDriver.MemcpyDtoH((IntPtr)pR, d_c, bufferBytes);
         }
         float sampleVal = result[0];
-        bool verified = Math.Abs(sampleVal - 30.0f) < 0.001f;
+        bool verified = Math.Abs(sampleVal - 40.0f) < 0.001f;
 
         // Cleanup
-        hParam.Free();
-        hArray.Free();
         CuDriver.MemFree(d_a);
         CuDriver.MemFree(d_b);
         CuDriver.MemFree(d_c);
-        CuDriver.MemFreeHost(hostTaskPtr);
+        if (_hostTaskPtr != IntPtr.Zero)
+        {
+            CuDriver.MemFreeHost(_hostTaskPtr);
+            _hostTaskPtr = IntPtr.Zero;
+            _devTaskPtr = IntPtr.Zero;
+        }
         _ringBuffer = null;
 
         return (dispatchUs, roundTripUs, verified, sampleVal);
@@ -344,6 +391,9 @@ public sealed unsafe class NvidiaSassEngine : IGpuEngine
             _disposed = true;
             _ringBuffer?.Dispose();
             _ringBuffer = null;
+
+            if (_hWorkerParam.IsAllocated) _hWorkerParam.Free();
+            if (_hWorkerArray.IsAllocated) _hWorkerArray.Free();
 
             if (_ctx != IntPtr.Zero)
             {

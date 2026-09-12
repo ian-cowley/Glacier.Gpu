@@ -145,39 +145,73 @@ DONE:
     .param .u64 task_ptr
 )
 {
-    .reg .pred %p_exit, %p_has_task, %p_add, %p_done;
+    .shared .align 8 .u32 s_opcode;
+    .shared .align 8 .u32 s_count;
+    .shared .align 8 .u64 s_bufA;
+    .shared .align 8 .u64 s_bufB;
+    .shared .align 8 .u64 s_bufC;
+    .shared .align 4 .f32 s_scalar;
+
+    .reg .pred %p_is_worker, %p_has_task, %p_exit, %p_add, %p_fma, %p_done;
     .reg .b32 %r_tid, %opcode, %status, %count, %last_task_id, %curr_task_id;
     .reg .b64 %rd_task, %rd_bufA, %rd_bufB, %rd_bufC, %rd_offset, %rd_ptr;
-    .reg .f32 %fA, %fB, %fC;
+    .reg .f32 %fA, %fB, %fC, %f_scalar;
 
     ld.param.u64 %rd_task, [task_ptr];
     mov.u32 %r_tid, %tid.x;
     mov.u32 %last_task_id, 0;
+    setp.ne.u32 %p_is_worker, %r_tid, 0;
 
 POLL_LOOP:
-    ld.global.volatile.u32 %opcode, [%rd_task + 4];
-    setp.eq.u32 %p_exit, %opcode, 99;
-    @%p_exit bra EXIT_WORKER;
+    @%p_is_worker bra WAIT_FOR_POLL;
 
-    ld.global.volatile.u32 %curr_task_id, [%rd_task];
+MASTER_POLL:
+    ld.acquire.sys.global.u32 %curr_task_id, [%rd_task];
     setp.ne.u32 %p_has_task, %curr_task_id, %last_task_id;
-    @!%p_has_task bra POLL_LOOP;
+    @!%p_has_task bra MASTER_POLL;
 
     mov.u32 %last_task_id, %curr_task_id;
 
+BROADCAST_TASK:
+    ld.acquire.sys.global.u32 %opcode, [%rd_task + 4];
+    st.shared.u32 [s_opcode], %opcode;
     ld.global.u32 %count, [%rd_task + 8];
+    st.shared.u32 [s_count], %count;
     ld.global.u64 %rd_bufA, [%rd_task + 16];
+    st.shared.u64 [s_bufA], %rd_bufA;
     ld.global.u64 %rd_bufB, [%rd_task + 24];
+    st.shared.u64 [s_bufB], %rd_bufB;
     ld.global.u64 %rd_bufC, [%rd_task + 32];
+    st.shared.u64 [s_bufC], %rd_bufC;
+    ld.global.f32 %f_scalar, [%rd_task + 48];
+    st.shared.f32 [s_scalar], %f_scalar;
 
-    setp.eq.u32 %p_add, %opcode, 1;
-    @!%p_add bra MARK_COMPLETE;
+WAIT_FOR_POLL:
+    bar.sync 0;
 
+    ld.shared.u32 %opcode, [s_opcode];
+    setp.eq.u32 %p_exit, %opcode, 99;
+    @%p_exit bra EXIT_WORKER;
+
+    ld.shared.u32 %count, [s_count];
     setp.ge.u32 %p_done, %r_tid, %count;
-    @%p_done bra MARK_COMPLETE;
+    @%p_done bra WORK_COMPLETE;
 
     cvt.u64.u32 %rd_offset, %r_tid;
     shl.b64 %rd_offset, %rd_offset, 2;
+
+    setp.eq.u32 %p_add, %opcode, 1;
+    @%p_add bra DO_VECTOR_ADD;
+
+    setp.eq.u32 %p_fma, %opcode, 2;
+    @%p_fma bra DO_VECTOR_FMA;
+
+    bra WORK_COMPLETE;
+
+DO_VECTOR_ADD:
+    ld.shared.u64 %rd_bufA, [s_bufA];
+    ld.shared.u64 %rd_bufB, [s_bufB];
+    ld.shared.u64 %rd_bufC, [s_bufC];
 
     add.s64 %rd_ptr, %rd_bufA, %rd_offset;
     ld.global.f32 %fA, [%rd_ptr];
@@ -189,19 +223,37 @@ POLL_LOOP:
 
     add.s64 %rd_ptr, %rd_bufC, %rd_offset;
     st.global.f32 [%rd_ptr], %fC;
+    bra WORK_COMPLETE;
 
-MARK_COMPLETE:
+DO_VECTOR_FMA:
+    ld.shared.u64 %rd_bufA, [s_bufA];
+    ld.shared.u64 %rd_bufB, [s_bufB];
+    ld.shared.u64 %rd_bufC, [s_bufC];
+    ld.shared.f32 %f_scalar, [s_scalar];
+
+    add.s64 %rd_ptr, %rd_bufA, %rd_offset;
+    ld.global.f32 %fA, [%rd_ptr];
+
+    add.s64 %rd_ptr, %rd_bufB, %rd_offset;
+    ld.global.f32 %fB, [%rd_ptr];
+
+    fma.rn.f32 %fC, %fA, %f_scalar, %fB;
+
+    add.s64 %rd_ptr, %rd_bufC, %rd_offset;
+    st.global.f32 [%rd_ptr], %fC;
+    bra WORK_COMPLETE;
+
+WORK_COMPLETE:
     bar.sync 0;
-    setp.eq.u32 %p_done, %r_tid, 0;
-    @!%p_done bra POLL_LOOP;
 
-    membar.gl;
+    @%p_is_worker bra POLL_LOOP;
+
+    membar.sys;
     mov.u32 %status, 1;
     st.global.volatile.u32 [%rd_task + 12], %status;
     bra POLL_LOOP;
 
 EXIT_WORKER:
-    bar.sync 0;
     ret;
 }
 ";

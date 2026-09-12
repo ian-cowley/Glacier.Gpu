@@ -53,8 +53,16 @@ public sealed unsafe class PersistentRingBuffer : IDisposable
         _task->Scalar = scalar;
         _task->Status = 0;
 
-        Thread.MemoryBarrier();
-        _task->TaskId = id;
+        if (System.Runtime.Intrinsics.X86.Sse.IsSupported)
+        {
+            System.Runtime.Intrinsics.X86.Sse.StoreFence();
+        }
+        else
+        {
+            Thread.MemoryBarrier();
+        }
+
+        Volatile.Write(ref _task->TaskId, id);
 
         return id;
     }
@@ -70,7 +78,7 @@ public sealed unsafe class PersistentRingBuffer : IDisposable
 
         // Spin-wait for completion flag from GPU
         var spinner = new SpinWait();
-        while (_task->Status == 0)
+        while (Volatile.Read(ref _task->Status) == 0)
         {
             spinner.SpinOnce();
         }
@@ -84,8 +92,18 @@ public sealed unsafe class PersistentRingBuffer : IDisposable
         if (_task != null && !_disposed)
         {
             _task->OpCode = (uint)TaskOpCode.Shutdown;
-            Thread.MemoryBarrier();
-            _task->TaskId = ++_sequenceCounter;
+            if (System.Runtime.Intrinsics.X86.Sse.IsSupported)
+            {
+                System.Runtime.Intrinsics.X86.Sse.StoreFence();
+            }
+            else
+            {
+                Thread.MemoryBarrier();
+            }
+            uint nextId = Math.Max(_sequenceCounter + 1, Volatile.Read(ref _task->TaskId) + 1);
+            _sequenceCounter = nextId;
+            Volatile.Write(ref _task->TaskId, nextId);
+            CuDriver.CtxSynchronize();
         }
     }
 
