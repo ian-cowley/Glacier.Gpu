@@ -28,6 +28,10 @@ public sealed unsafe class VulkanContext : IDisposable
     public bool HasCooperativeMatrix { get; }
     public IntPtr DeviceHandle => _device;
     public IntPtr InstanceHandle => _instance;
+    public IntPtr QueueHandle => _computeQueue;
+    public IntPtr CommandPoolHandle => _commandPool;
+    public IntPtr CommandBufferHandle => _commandBuffer;
+    public uint ComputeQueueIndex => _computeQueueIndex;
 
     public static bool IsSupported
     {
