@@ -22,11 +22,29 @@ public static class HipDriver
     public const int HIP_MEMCPY_DEVICE_TO_HOST = 2;
     public const int HIP_MEMCPY_DEVICE_TO_DEVICE = 3;
 
+    static HipDriver()
+    {
+        NativeDriverResolver.EnsureRegistered();
+    }
+
     private static readonly Lazy<bool> _isAvailable = new(() =>
     {
         try
         {
-            return NativeLibrary.TryLoad(HipLib, out IntPtr handle) && handle != IntPtr.Zero;
+            NativeDriverResolver.EnsureRegistered();
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                return (NativeLibrary.TryLoad("amdhip64.dll", out IntPtr handle) ||
+                        NativeLibrary.TryLoad("amdhip64_6.dll", out handle) ||
+                        NativeLibrary.TryLoad("amdhip64_7.dll", out handle)) && handle != IntPtr.Zero;
+            }
+            else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+            {
+                return (NativeLibrary.TryLoad("libamdhip64.so", out IntPtr handle) ||
+                        NativeLibrary.TryLoad("libamdhip64.so.6", out handle) ||
+                        NativeLibrary.TryLoad("/opt/rocm/lib/libamdhip64.so", out handle)) && handle != IntPtr.Zero;
+            }
+            return false;
         }
         catch
         {

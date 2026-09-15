@@ -16,11 +16,26 @@ public static class CuDriver
     public const uint CU_MEMHOSTALLOC_DEVICEMAP = 0x02;
     public const uint CU_MEMHOSTALLOC_WRITECOMBINED = 0x04;
 
+    static CuDriver()
+    {
+        NativeDriverResolver.EnsureRegistered();
+    }
+
     private static readonly Lazy<bool> _isAvailable = new(() =>
     {
         try
         {
-            return NativeLibrary.TryLoad(CudaLib, out IntPtr handle) && handle != IntPtr.Zero;
+            NativeDriverResolver.EnsureRegistered();
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                return NativeLibrary.TryLoad("nvcuda.dll", out IntPtr handle) && handle != IntPtr.Zero;
+            }
+            else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+            {
+                return (NativeLibrary.TryLoad("libcuda.so.1", out IntPtr handle) ||
+                        NativeLibrary.TryLoad("libcuda.so", out handle)) && handle != IntPtr.Zero;
+            }
+            return false;
         }
         catch
         {

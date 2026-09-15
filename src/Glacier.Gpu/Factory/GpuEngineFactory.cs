@@ -11,10 +11,11 @@ namespace Glacier.Gpu.Factory;
 public static class GpuEngineFactory
 {
     public static bool HasNvidiaGpu => CuDriver.IsAvailable();
-    public static bool HasAmdGpu => HipDriver.IsAvailable() || HasAmdD3D12;
+    public static bool HasAmdGpu => HipDriver.IsAvailable() || HasAmdD3D12 || HasVulkan;
     public static bool HasDirectMl => DirectMlDriver.IsAvailable();
     public static bool HasIntelGpu => DirectMlDriver.HasIntelGpu;
     public static bool HasD3D12 => OperatingSystem.IsWindows();
+    public static bool HasVulkan => VulkanDriver.IsAvailable();
 
     public static bool HasAmdD3D12
     {
@@ -66,6 +67,17 @@ public static class GpuEngineFactory
             var amd = new AmdRdnaEngine();
             amd.Initialize();
             return amd;
+        }
+
+        if (HasVulkan)
+        {
+            try
+            {
+                var vk = new VulkanEngine();
+                vk.Initialize();
+                return vk;
+            }
+            catch { }
         }
 
         if (HasDirectMl)
@@ -188,6 +200,21 @@ public static class GpuEngineFactory
                 }
             }
             return null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    public static VulkanEngine? TryCreateVulkanEngine()
+    {
+        if (!HasVulkan) return null;
+        try
+        {
+            var vk = new VulkanEngine();
+            vk.Initialize();
+            return vk;
         }
         catch
         {

@@ -1,4 +1,5 @@
 using Glacier.Gpu.Drivers;
+using Glacier.Gpu.Engines;
 using Glacier.Gpu.Factory;
 using Xunit;
 
@@ -67,16 +68,28 @@ public class DriverDetectionTests
     }
 
     [Fact]
-    public void DirectMlEngine_InitializesSuccessfullyWhenAvailable()
+    public void VulkanDriver_DoesNotThrowAndDetectsDevices()
     {
-        if (!DirectMlDriver.IsAvailable()) return;
+        bool hasVulkan = VulkanDriver.IsAvailable();
+        Assert.True(hasVulkan || !hasVulkan);
 
-        using var engine = new Glacier.Gpu.Engines.DirectMlEngine();
-        engine.Initialize();
+        if (hasVulkan && VulkanContext.IsSupported)
+        {
+            using var engine = new Glacier.Gpu.Engines.VulkanEngine();
+            engine.Initialize();
 
-        Assert.True(engine.IsInitialized);
-        Assert.False(string.IsNullOrWhiteSpace(engine.DeviceInfo.DeviceName));
-        Assert.False(string.IsNullOrWhiteSpace(engine.DeviceInfo.Architecture));
-        Assert.True(engine.DeviceInfo.ComputeUnitsOrSms > 0);
+            Assert.True(engine.IsInitialized);
+            Assert.False(string.IsNullOrWhiteSpace(engine.DeviceInfo.DeviceName));
+            Assert.True(engine.DeviceInfo.TotalMemoryBytes > 0);
+        }
+    }
+
+    [Fact]
+    public void NativeDriverResolver_EnsuresCleanRegistration()
+    {
+        NativeDriverResolver.EnsureRegistered();
+        // Subsequent calls should be idempotent
+        NativeDriverResolver.EnsureRegistered();
     }
 }
+

@@ -11,5 +11,6 @@ public enum GpuDeviceType
     AmdDiscrete = 3,
     IntelDiscrete = 4,
     IntelIntegrated = 5,
-    DirectMlGeneric = 6
+    DirectMlGeneric = 6,
+    VulkanGeneric = 7
 }
