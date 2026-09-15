@@ -8,7 +8,7 @@ using System.Text;
 /// Direct, zero-dependency P/Invoke bindings to the native Vulkan driver (vulkan-1.dll on Windows, libvulkan.so.1 on Linux).
 /// Enables universal cross-vendor compute acceleration and checks for VK_KHR_cooperative_matrix hardware tensor support.
 /// </summary>
-public static class VulkanDriver
+public static unsafe class VulkanDriver
 {
     private const string VulkanLib = "vulkan-1.dll";
 
