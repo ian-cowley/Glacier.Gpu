@@ -1,3 +1,5 @@
+![Glacier.Gpu Banner](assets/banner.jpg)
+
 # Glacier.Gpu
 
 **Heterogeneous Bare-Metal GPU Compute Engine in C# .NET 10**  
