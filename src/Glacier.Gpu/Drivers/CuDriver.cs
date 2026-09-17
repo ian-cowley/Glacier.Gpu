@@ -115,8 +115,16 @@ public static class CuDriver
     public static extern int MemcpyHtoD(IntPtr dstDevice, IntPtr srcHost, nuint byteCount);
 
     [SuppressGCTransition]
+    [DllImport(CudaLib, EntryPoint = "cuMemcpyHtoDAsync_v2")]
+    public static extern int MemcpyHtoDAsync(IntPtr dstDevice, IntPtr srcHost, nuint byteCount, IntPtr hStream);
+
+    [SuppressGCTransition]
     [DllImport(CudaLib, EntryPoint = "cuMemcpyDtoH_v2")]
     public static extern int MemcpyDtoH(IntPtr dstHost, IntPtr srcDevice, nuint byteCount);
+
+    [SuppressGCTransition]
+    [DllImport(CudaLib, EntryPoint = "cuMemcpyDtoHAsync_v2")]
+    public static extern int MemcpyDtoHAsync(IntPtr dstHost, IntPtr srcDevice, nuint byteCount, IntPtr hStream);
 
     [SuppressGCTransition]
     [DllImport(CudaLib, EntryPoint = "cuLaunchKernel")]
@@ -155,6 +163,12 @@ public static class CuDriver
     {
         DeviceGetAttribute(out int smCount, 16 /* CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT */, device);
         return smCount;
+    }
+
+    public static int GetMaxThreadsPerBlock(int device)
+    {
+        DeviceGetAttribute(out int maxThreads, 1 /* CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK */, device);
+        return maxThreads > 0 ? maxThreads : 1024;
     }
 
     public static void Check(int res, string op)

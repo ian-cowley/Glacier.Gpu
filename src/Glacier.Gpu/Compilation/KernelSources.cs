@@ -153,7 +153,7 @@ DONE:
     .shared .align 4 .f32 s_scalar;
 
     .reg .pred %p_is_worker, %p_has_task, %p_exit, %p_add, %p_fma, %p_done;
-    .reg .b32 %r_tid, %opcode, %status, %count, %last_task_id, %curr_task_id;
+    .reg .b32 %r_tid, %opcode, %status, %count, %last_task_id, %curr_task_id, %r_idx, %r_stride;
     .reg .b64 %rd_task, %rd_bufA, %rd_bufB, %rd_bufC, %rd_offset, %rd_ptr;
     .reg .f32 %fA, %fB, %fC, %f_scalar;
 
@@ -194,21 +194,24 @@ WAIT_FOR_POLL:
     @%p_exit bra EXIT_WORKER;
 
     ld.shared.u32 %count, [s_count];
-    setp.ge.u32 %p_done, %r_tid, %count;
-    @%p_done bra WORK_COMPLETE;
-
-    cvt.u64.u32 %rd_offset, %r_tid;
-    shl.b64 %rd_offset, %rd_offset, 2;
+    mov.u32 %r_idx, %r_tid;
+    mov.u32 %r_stride, %ntid.x;
 
     setp.eq.u32 %p_add, %opcode, 1;
-    @%p_add bra DO_VECTOR_ADD;
+    @%p_add bra LOOP_ADD;
 
     setp.eq.u32 %p_fma, %opcode, 2;
-    @%p_fma bra DO_VECTOR_FMA;
+    @%p_fma bra LOOP_FMA;
 
     bra WORK_COMPLETE;
 
-DO_VECTOR_ADD:
+LOOP_ADD:
+    setp.ge.u32 %p_done, %r_idx, %count;
+    @%p_done bra WORK_COMPLETE;
+
+    cvt.u64.u32 %rd_offset, %r_idx;
+    shl.b64 %rd_offset, %rd_offset, 2;
+
     ld.shared.u64 %rd_bufA, [s_bufA];
     ld.shared.u64 %rd_bufB, [s_bufB];
     ld.shared.u64 %rd_bufC, [s_bufC];
@@ -223,9 +226,17 @@ DO_VECTOR_ADD:
 
     add.s64 %rd_ptr, %rd_bufC, %rd_offset;
     st.global.f32 [%rd_ptr], %fC;
-    bra WORK_COMPLETE;
 
-DO_VECTOR_FMA:
+    add.u32 %r_idx, %r_idx, %r_stride;
+    bra LOOP_ADD;
+
+LOOP_FMA:
+    setp.ge.u32 %p_done, %r_idx, %count;
+    @%p_done bra WORK_COMPLETE;
+
+    cvt.u64.u32 %rd_offset, %r_idx;
+    shl.b64 %rd_offset, %rd_offset, 2;
+
     ld.shared.u64 %rd_bufA, [s_bufA];
     ld.shared.u64 %rd_bufB, [s_bufB];
     ld.shared.u64 %rd_bufC, [s_bufC];
@@ -241,7 +252,9 @@ DO_VECTOR_FMA:
 
     add.s64 %rd_ptr, %rd_bufC, %rd_offset;
     st.global.f32 [%rd_ptr], %fC;
-    bra WORK_COMPLETE;
+
+    add.u32 %r_idx, %r_idx, %r_stride;
+    bra LOOP_FMA;
 
 WORK_COMPLETE:
     bar.sync 0;

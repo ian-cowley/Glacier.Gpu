@@ -16,6 +16,7 @@ namespace Glacier.Gpu.Engines;
 public sealed unsafe class NvidiaSassEngine : IGpuEngine
 {
     private IntPtr _ctx;
+    private int _device;
     private IntPtr _modAdd;
     private IntPtr _modFma;
     private IntPtr _modWorker;
@@ -47,6 +48,7 @@ public sealed unsafe class NvidiaSassEngine : IGpuEngine
             throw new InvalidOperationException("No CUDA-capable GPU devices found.");
 
         CuDriver.Check(CuDriver.DeviceGet(out int dev, 0), "cuDeviceGet");
+        _device = dev;
         string devName = CuDriver.GetDeviceName(dev);
         string arch = CuDriver.GetComputeCapability(dev);
         int smCount = CuDriver.GetMultiprocessorCount(dev);
@@ -158,15 +160,18 @@ public sealed unsafe class NvidiaSassEngine : IGpuEngine
     /// Measures CPU-to-GPU fire-and-forget enqueue latency vs round-trip synchronous latency.
     /// </summary>
     /// <summary>
-    /// Gets or initializes the persistent ring buffer worker on the GPU.
+    /// Gets or initializes the persistent ring buffer worker on the GPU with up to 1024 threads.
     /// </summary>
-    public PersistentRingBuffer GetOrCreateRingBuffer(int threadCount = 256)
+    public PersistentRingBuffer GetOrCreateRingBuffer(int threadCount = 1024)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (_ringBuffer != null && !_ringBuffer.IsDisposed)
             return _ringBuffer;
 
         CuDriver.CtxSetCurrent(_ctx);
+        int maxThreads = CuDriver.GetMaxThreadsPerBlock(_device);
+        int actualThreads = Math.Clamp(threadCount, 32, maxThreads);
+
         nuint taskBytes = (nuint)sizeof(GpuWorkTask);
         CuDriver.Check(CuDriver.MemHostAlloc(
             out _hostTaskPtr,
@@ -180,7 +185,7 @@ public sealed unsafe class NvidiaSassEngine : IGpuEngine
         GpuWorkTask* task = (GpuWorkTask*)_hostTaskPtr;
         task->TaskId = 0;
         task->OpCode = (uint)TaskOpCode.Nop;
-        task->ElementCount = (uint)threadCount;
+        task->ElementCount = (uint)actualThreads;
         task->Status = 1;
 
         IntPtr devTask = _devTaskPtr;
@@ -190,7 +195,7 @@ public sealed unsafe class NvidiaSassEngine : IGpuEngine
         CuDriver.Check(CuDriver.LaunchKernel(
             _fnWorker,
             1, 1, 1,
-            (uint)threadCount, 1, 1,
+            (uint)actualThreads, 1, 1,
             0, IntPtr.Zero,
             (IntPtr)launchParams,
             IntPtr.Zero), "LaunchKernel(PersistentWorker)");
@@ -200,13 +205,13 @@ public sealed unsafe class NvidiaSassEngine : IGpuEngine
     }
 
     /// <summary>
-    /// Measures CPU-to-GPU fire-and-forget enqueue latency vs round-trip synchronous latency.
+    /// Measures CPU-to-GPU fire-and-forget enqueue latency vs round-trip synchronous latency across arbitrary vector sizes.
     /// </summary>
-    public (double dispatchUs, double roundTripUs, bool verified, float sampleVal) MeasureRingBufferLatency(int iterations = 10_000)
+    public (double dispatchUs, double roundTripUs, bool verified, float sampleVal) MeasureRingBufferLatency(int iterations = 10_000, int elementCount = 256)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         CuDriver.CtxSetCurrent(_ctx);
-        const int N = 256;
+        int N = elementCount;
         nuint bufferBytes = (nuint)(N * sizeof(float));
 
         // Allocate data buffers
@@ -225,7 +230,7 @@ public sealed unsafe class NvidiaSassEngine : IGpuEngine
             CuDriver.MemcpyHtoD(d_b, (IntPtr)pB, bufferBytes);
         }
 
-        PersistentRingBuffer ring = GetOrCreateRingBuffer(N);
+        PersistentRingBuffer ring = GetOrCreateRingBuffer(1024);
         GpuWorkTask* task = (GpuWorkTask*)ring.HostTaskPointer;
         task->ElementCount = (uint)N;
         task->BufferA = (ulong)d_a;
@@ -298,7 +303,11 @@ public sealed unsafe class NvidiaSassEngine : IGpuEngine
             CuDriver.MemcpyDtoH((IntPtr)pR, d_c, bufferBytes);
         }
         float sampleVal = result[0];
-        bool verified = Math.Abs(sampleVal - 40.0f) < 0.001f;
+        bool verified = Math.Abs(sampleVal - 40.0f) < 0.001f && Math.Abs(result[N - 1] - 40.0f) < 0.001f;
+        if (N > 256)
+        {
+            verified = verified && Math.Abs(result[256] - 40.0f) < 0.001f && Math.Abs(result[N / 2] - 40.0f) < 0.001f;
+        }
 
         // Cleanup
         CuDriver.MemFree(d_a);

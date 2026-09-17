@@ -17,17 +17,21 @@ public sealed unsafe class PersistentRingBuffer : IDisposable
     private GpuWorkTask* _task;
     private uint _sequenceCounter;
     private bool _disposed;
+    private readonly Action? _shutdownAction;
+    private readonly Action? _disposeAction;
 
     public IntPtr HostTaskPointer => _hostTaskPtr;
     public IntPtr DeviceTaskPointer => _devTaskPtr;
     public bool IsDisposed => _disposed;
 
-    public PersistentRingBuffer(IntPtr hostTaskPtr, IntPtr devTaskPtr)
+    public PersistentRingBuffer(IntPtr hostTaskPtr, IntPtr devTaskPtr, Action? shutdownAction = null, Action? disposeAction = null)
     {
         _hostTaskPtr = hostTaskPtr;
         _devTaskPtr = devTaskPtr;
         _task = (GpuWorkTask*)hostTaskPtr;
         _sequenceCounter = 1;
+        _shutdownAction = shutdownAction;
+        _disposeAction = disposeAction;
 
         // Initialize task header
         _task->TaskId = 0;
@@ -103,7 +107,14 @@ public sealed unsafe class PersistentRingBuffer : IDisposable
             uint nextId = Math.Max(_sequenceCounter + 1, Volatile.Read(ref _task->TaskId) + 1);
             _sequenceCounter = nextId;
             Volatile.Write(ref _task->TaskId, nextId);
-            CuDriver.CtxSynchronize();
+            if (_shutdownAction != null)
+            {
+                _shutdownAction();
+            }
+            else if (CuDriver.IsAvailable())
+            {
+                CuDriver.CtxSynchronize();
+            }
         }
     }
 
@@ -113,9 +124,19 @@ public sealed unsafe class PersistentRingBuffer : IDisposable
         {
             Shutdown();
             _disposed = true;
-            if (_hostTaskPtr != IntPtr.Zero)
+            if (_disposeAction != null)
             {
-                CuDriver.MemFreeHost(_hostTaskPtr);
+                _disposeAction();
+                _hostTaskPtr = IntPtr.Zero;
+                _devTaskPtr = IntPtr.Zero;
+                _task = null;
+            }
+            else if (_hostTaskPtr != IntPtr.Zero)
+            {
+                if (CuDriver.IsAvailable())
+                {
+                    CuDriver.MemFreeHost(_hostTaskPtr);
+                }
                 _hostTaskPtr = IntPtr.Zero;
                 _devTaskPtr = IntPtr.Zero;
                 _task = null;
