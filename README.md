@@ -5,9 +5,12 @@
 **Heterogeneous Bare-Metal GPU Compute Engine in C# .NET 10**  
 *Direct Driver APIs &bull; Raw SASS Machine Code &bull; Sub-Microsecond Ring Buffer &bull; Zero-Copy AMD APU &bull; Dual-GPU Orchestration*
 
-[![Build and Test](https://img.shields.io/badge/.NET-10.0-512BD4)](https://dotnet.microsoft.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Architecture: BareMetal](https://img.shields.io/badge/Architecture-Bare--Metal-brightgreen)](#)
+[![.NET 10](https://img.shields.io/badge/.NET-10.0-purple.svg)](https://dotnet.microsoft.com/)
+[![Native AOT](https://img.shields.io/badge/Native%20AOT-Ready-brightgreen.svg)](https://learn.microsoft.com/dotnet/core/deploying/native-aot/)
+[![NuGet Version](https://img.shields.io/nuget/v/Glacier.Gpu.svg)](https://www.nuget.org/packages/Glacier.Gpu/)
+[![Ecosystem](https://img.shields.io/badge/Glacier-Ecosystem-blue)](https://github.com/ian-cowley)
+[![Hardware: Bare-Metal GPU](https://img.shields.io/badge/Hardware-Bare--Metal%20GPU-brightgreen.svg)](#)
 
 ---
 
