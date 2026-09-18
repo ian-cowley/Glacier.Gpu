@@ -270,4 +270,90 @@ EXIT_WORKER:
     ret;
 }
 ";
+
+    /// <summary>
+    /// Fused in-VRAM argmax and temperature-scaled softmax reduction kernel.
+    /// Emits 8-byte ClavierDecision (uint ActionId, float Confidence) directly in GPU device memory.
+    /// </summary>
+    public const string ArgmaxReductionPtx = @"
+.version 8.0
+.target sm_86
+.address_size 64
+
+.visible .entry argmax_reduction_f32(
+    .param .u64 d_logits,
+    .param .u64 d_decision,
+    .param .u32 k_classes,
+    .param .f32 temperature
+)
+{
+    .reg .pred %p_valid, %p_gt, %p_loop;
+    .reg .b32 %tid, %k, %i, %best_id;
+    .reg .b64 %rd_logits, %rd_decision, %rd_offset, %rd_ptr;
+    .reg .f32 %t, %inv_t, %logit, %scaled, %max_val, %sum_exp, %exp_val, %conf;
+
+    mov.u32 %tid, %tid.x;
+    setp.eq.u32 %p_valid, %tid, 0;
+    @!%p_valid bra DONE;
+
+    ld.param.u64 %rd_logits, [d_logits];
+    ld.param.u64 %rd_decision, [d_decision];
+    ld.param.u32 %k, [k_classes];
+    ld.param.f32 %t, [temperature];
+
+    rcp.approx.f32 %inv_t, %t;
+
+    ld.global.f32 %max_val, [%rd_logits];
+    mul.f32 %max_val, %max_val, %inv_t;
+    mov.u32 %best_id, 0;
+    mov.u32 %i, 1;
+
+FIND_MAX_LOOP:
+    setp.ge.u32 %p_loop, %i, %k;
+    @%p_loop bra FIND_MAX_DONE;
+
+    cvt.u64.u32 %rd_offset, %i;
+    shl.b64 %rd_offset, %rd_offset, 2;
+    add.s64 %rd_ptr, %rd_logits, %rd_offset;
+    ld.global.f32 %logit, [%rd_ptr];
+    mul.f32 %scaled, %logit, %inv_t;
+
+    setp.gt.f32 %p_gt, %scaled, %max_val;
+    @%p_gt mov.f32 %max_val, %scaled;
+    @%p_gt mov.u32 %best_id, %i;
+
+    add.u32 %i, %i, 1;
+    bra FIND_MAX_LOOP;
+
+FIND_MAX_DONE:
+    mov.f32 %sum_exp, 0.0;
+    mov.u32 %i, 0;
+
+SUM_EXP_LOOP:
+    setp.ge.u32 %p_loop, %i, %k;
+    @%p_loop bra SUM_EXP_DONE;
+
+    cvt.u64.u32 %rd_offset, %i;
+    shl.b64 %rd_offset, %rd_offset, 2;
+    add.s64 %rd_ptr, %rd_logits, %rd_offset;
+    ld.global.f32 %logit, [%rd_ptr];
+    mul.f32 %scaled, %logit, %inv_t;
+    sub.f32 %scaled, %scaled, %max_val;
+    mul.f32 %scaled, %scaled, 1.4426950408889634;
+    ex2.approx.f32 %exp_val, %scaled;
+    add.f32 %sum_exp, %sum_exp, %exp_val;
+
+    add.u32 %i, %i, 1;
+    bra SUM_EXP_LOOP;
+
+SUM_EXP_DONE:
+    rcp.approx.f32 %conf, %sum_exp;
+
+    st.global.u32 [%rd_decision], %best_id;
+    st.global.f32 [%rd_decision + 4], %conf;
+
+DONE:
+    ret;
+}
+";
 }

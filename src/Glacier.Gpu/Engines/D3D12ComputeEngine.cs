@@ -222,13 +222,14 @@ public sealed unsafe class D3D12ComputeEngine : IGpuEngine
         if (_ringBuffer != null)
             return _ringBuffer;
 
-        _ringTaskBlock = AllocateZeroCopy<GpuWorkTask>(1);
+        _ringTaskBlock = AllocateZeroCopy<GpuWorkTask>(64);
 
         InitRingPipelines();
 
         _ringBuffer = new PersistentRingBuffer(
             _ringTaskBlock.HostPointer,
             _ringTaskBlock.DevicePointer,
+            capacity: 64,
             shutdownAction: () => Synchronize(),
             disposeAction: () =>
             {

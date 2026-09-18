@@ -41,8 +41,10 @@ public static class HipDriver
             else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
             {
                 return (NativeLibrary.TryLoad("libamdhip64.so", out IntPtr handle) ||
+                        NativeLibrary.TryLoad("libamdhip64.so.7", out handle) ||
                         NativeLibrary.TryLoad("libamdhip64.so.6", out handle) ||
-                        NativeLibrary.TryLoad("/opt/rocm/lib/libamdhip64.so", out handle)) && handle != IntPtr.Zero;
+                        NativeLibrary.TryLoad("/opt/rocm/lib/libamdhip64.so", out handle) ||
+                        NativeLibrary.TryLoad("/opt/rocm-7.2.0/lib/libamdhip64.so", out handle)) && handle != IntPtr.Zero;
             }
             return false;
         }

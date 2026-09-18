@@ -56,8 +56,10 @@ public static class NativeDriverResolver
             else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
             {
                 if (NativeLibrary.TryLoad("libamdhip64.so", assembly, searchPath, out IntPtr handle) ||
+                    NativeLibrary.TryLoad("libamdhip64.so.7", assembly, searchPath, out handle) ||
                     NativeLibrary.TryLoad("libamdhip64.so.6", assembly, searchPath, out handle) ||
-                    NativeLibrary.TryLoad("/opt/rocm/lib/libamdhip64.so", assembly, searchPath, out handle))
+                    NativeLibrary.TryLoad("/opt/rocm/lib/libamdhip64.so", assembly, searchPath, out handle) ||
+                    NativeLibrary.TryLoad("/opt/rocm-7.2.0/lib/libamdhip64.so", assembly, searchPath, out handle))
                     return handle;
             }
         }

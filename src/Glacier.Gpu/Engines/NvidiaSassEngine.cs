@@ -172,7 +172,8 @@ public sealed unsafe class NvidiaSassEngine : IGpuEngine
         int maxThreads = CuDriver.GetMaxThreadsPerBlock(_device);
         int actualThreads = Math.Clamp(threadCount, 32, maxThreads);
 
-        nuint taskBytes = (nuint)sizeof(GpuWorkTask);
+        const int DefaultRingCapacity = 64;
+        nuint taskBytes = (nuint)(sizeof(GpuWorkTask) * DefaultRingCapacity);
         CuDriver.Check(CuDriver.MemHostAlloc(
             out _hostTaskPtr,
             taskBytes,
@@ -180,7 +181,7 @@ public sealed unsafe class NvidiaSassEngine : IGpuEngine
             "cuMemHostAlloc");
         CuDriver.Check(CuDriver.MemHostGetDevicePointer(out _devTaskPtr, _hostTaskPtr, 0), "cuMemHostGetDevicePointer");
 
-        _ringBuffer = new PersistentRingBuffer(_hostTaskPtr, _devTaskPtr);
+        _ringBuffer = new PersistentRingBuffer(_hostTaskPtr, _devTaskPtr, DefaultRingCapacity);
 
         GpuWorkTask* task = (GpuWorkTask*)_hostTaskPtr;
         task->TaskId = 0;
