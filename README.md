@@ -214,6 +214,15 @@ dotnet run --project benchmarks/Glacier.Gpu.Benchmarks/Glacier.Gpu.Benchmarks.cs
 
 ---
 
+## 🆕 What's New in v1.0.7
+
+- **Dmitry Vyukov lock-free bounded MPMC ring buffer** — sub-microsecond kernel dispatch with true concurrent producer/consumer handoff.
+- **Dead `BidirectionalAttentionPtx` stub purged** — eliminates unreachable code and binary bloat.
+- **Native Linux CUDA library discovery** — automatically probes `libcuda.so.1` / `libcuda.so` enabling bare-metal GPU operation on Linux without the CUDA toolkit.
+- **20 tests** passing (100 %).
+
+---
+
 ## Credits
 
 Developed by Ian Cowley and Antigravity (Google DeepMind).
