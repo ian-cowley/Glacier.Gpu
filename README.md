@@ -95,6 +95,9 @@ Unlike traditional libraries that rely on heavy native C++ wrappers (`cudart64.d
 | **AMD 890M Zero-Copy Latency** | PCIe Staging Buffer (~15 μs) | **0.300 μs (300 ns)** | **50× Lower Latency (Zero PCIe Copy)** |
 | **AMD Unified Memory Bandwidth**| Host-Device Copy (~8 GB/s) | **34.09 GB/s** | **4.2× Higher Bandwidth** |
 | **Dual-GPU Concurrent Exec** | Sequential Execution (~350 ms) | **123.28 ms** | **Parallel Heterogeneous Overlap** |
+| **AMD Architecture Support** | RDNA 2.0 / 3.0 / 3.5 | **RDNA 4.0 (`gfx1200`) + 3.5** | **Forward Compatible RX 9000 Ready** |
+| **Wavefront Execution Tuning** | Wave64 Divergence Stalls | **Wave32 Dual-Issue (RDNA)** | **Eliminates ALU Idle Bubbles** |
+| **8B LLM KV-Cache at 32K Context** | 8.00 GB FP32 (Crashes OOM) | **2.00 GB (Native FP8)** | **75% VRAM Reduction (4× Context Window)** |
 
 ---
 

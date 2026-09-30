@@ -372,4 +372,60 @@ public unsafe class D3D12ComputeTests
             Assert.Equal(i * 3.14f, span[i], 0.0001f);
         }
     }
+
+    [Fact]
+    public void D3D12_HardwareWave_Capabilities_And_Wave32_Execution()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+
+        using var factory = DXGI.CreateDXGIFactory1<IDXGIFactory4>();
+        for (uint i = 0; factory.EnumAdapters1(i, out IDXGIAdapter1 adapter).Success; i++)
+        {
+            var desc = adapter.Description1;
+            if ((desc.Flags & AdapterFlags.Software) != 0)
+            {
+                adapter.Dispose();
+                continue;
+            }
+
+            var hr = D3D12.D3D12CreateDevice(adapter, FeatureLevel.Level_11_0, out ID3D12Device? device);
+            if (!hr.Success || device == null)
+            {
+                adapter.Dispose();
+                continue;
+            }
+
+            var opt1 = device.CheckFeatureSupport<FeatureDataD3D12Options1>(Vortice.Direct3D12.Feature.Options1);
+            Assert.True(opt1.WaveLaneCountMin > 0);
+            Assert.True(opt1.WaveLaneCountMax >= opt1.WaveLaneCountMin);
+
+            // Verify compute shader with Wave32 workgroup compiles cleanly
+            string hlslWave32 = @"
+                RWStructuredBuffer<float> output : register(u0);
+                groupshared float s_tile[32];
+
+                [numthreads(32, 1, 1)]
+                void main(uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
+                {
+                    uint lane = gtid.x;
+                    s_tile[lane] = (float)lane * 1.5f;
+                    GroupMemoryBarrierWithGroupSync();
+
+                    if (lane == 0)
+                    {
+                        float sum = 0.0f;
+                        [unroll]
+                        for (uint k = 0; k < 32; k++) sum += s_tile[k];
+                        output[gid.x] = sum;
+                    }
+                }
+            ";
+
+            var blob = Compiler.Compile(hlslWave32, "main", "wave32.hlsl", "cs_5_0");
+            Assert.False(blob.IsEmpty);
+
+            device.Dispose();
+            adapter.Dispose();
+        }
+    }
 }

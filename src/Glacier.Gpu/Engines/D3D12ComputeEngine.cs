@@ -134,14 +134,8 @@ public sealed unsafe class D3D12ComputeEngine : IGpuEngine
                      lowerName.Contains("graphics") || lowerName.Contains("apu");
 
         string arch;
-        if (lowerName.Contains("890m") || lowerName.Contains("880m"))
-            arch = "RDNA 3.5 (gfx1150)";
-        else if (lowerName.Contains("780m") || lowerName.Contains("760m") || lowerName.Contains("740m"))
-            arch = "RDNA 3.0 (gfx1103)";
-        else if (lowerName.Contains("680m") || lowerName.Contains("660m"))
-            arch = "RDNA 2.0 (gfx1035)";
-        else if (lowerName.Contains("radeon"))
-            arch = isApu ? "RDNA APU" : "RDNA dGPU";
+        if (lowerName.Contains("radeon"))
+            arch = AmdRdnaEngine.ResolveArchitecture(devName, isApu);
         else
             arch = "DirectX 12 Compute";
 

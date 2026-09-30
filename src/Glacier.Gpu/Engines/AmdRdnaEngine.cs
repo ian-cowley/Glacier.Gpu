@@ -37,17 +37,7 @@ public sealed unsafe class AmdRdnaEngine : IGpuEngine
                      lowerName.Contains("680m") || lowerName.Contains("660m") ||
                      lowerName.Contains("graphics") || lowerName.Contains("apu");
 
-        string arch;
-        if (lowerName.Contains("890m") || lowerName.Contains("880m"))
-            arch = "RDNA 3.5 (gfx1150)";
-        else if (lowerName.Contains("780m") || lowerName.Contains("760m") || lowerName.Contains("740m") ||
-                 lowerName.Contains("7900") || lowerName.Contains("7800") || lowerName.Contains("7700") || lowerName.Contains("7600"))
-            arch = "RDNA 3.0 (gfx1103)";
-        else if (lowerName.Contains("680m") || lowerName.Contains("660m") ||
-                 lowerName.Contains("6900") || lowerName.Contains("6800") || lowerName.Contains("6700") || lowerName.Contains("6600"))
-            arch = "RDNA 2.0 (gfx1035)";
-        else
-            arch = isApu ? "RDNA APU" : "RDNA dGPU";
+        string arch = ResolveArchitecture(devName, isApu);
 
         int cuCount = HipDriver.GetMultiprocessorCount(0);
         long totalMem = (long)HipDriver.GetTotalMemory(0);
@@ -166,6 +156,26 @@ public sealed unsafe class AmdRdnaEngine : IGpuEngine
         {
             HipDriver.DeviceSynchronize();
         }
+    }
+
+    /// <summary>
+    /// Identifies the RDNA architecture family and ISA revision (including RDNA 4.0 gfx1200, RDNA 3.5, 3.0, 2.0).
+    /// </summary>
+    public static string ResolveArchitecture(string devName, bool isApu)
+    {
+        string lower = devName.ToLowerInvariant();
+        if (lower.Contains("9070") || lower.Contains("9080") || lower.Contains("9090") ||
+            lower.Contains("9060") || lower.Contains("rx 9") || lower.Contains("gfx1200") || lower.Contains("gfx1201"))
+            return "RDNA 4.0 (gfx1200)";
+        if (lower.Contains("890m") || lower.Contains("880m") || lower.Contains("gfx1150"))
+            return "RDNA 3.5 (gfx1150)";
+        if (lower.Contains("780m") || lower.Contains("760m") || lower.Contains("740m") ||
+            lower.Contains("7900") || lower.Contains("7800") || lower.Contains("7700") || lower.Contains("7600") || lower.Contains("gfx110"))
+            return "RDNA 3.0 (gfx1103)";
+        if (lower.Contains("680m") || lower.Contains("660m") ||
+            lower.Contains("6900") || lower.Contains("6800") || lower.Contains("6700") || lower.Contains("6600") || lower.Contains("gfx103"))
+            return "RDNA 2.0 (gfx1035)";
+        return isApu ? "RDNA APU" : "RDNA dGPU";
     }
 
     public void Dispose()

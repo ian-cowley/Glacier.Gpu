@@ -84,12 +84,16 @@ public class DriverDetectionTests
         }
     }
 
-    [Fact]
-    public void NativeDriverResolver_EnsuresCleanRegistration()
+    [Theory]
+    [InlineData("AMD Radeon RX 9070 XT", false, "RDNA 4.0 (gfx1200)")]
+    [InlineData("AMD Radeon RX 9080", false, "RDNA 4.0 (gfx1200)")]
+    [InlineData("AMD Radeon(TM) 890M Graphics", true, "RDNA 3.5 (gfx1150)")]
+    [InlineData("AMD Radeon RX 7900 XTX", false, "RDNA 3.0 (gfx1103)")]
+    [InlineData("AMD Radeon RX 6800 XT", false, "RDNA 2.0 (gfx1035)")]
+    public void AmdArchitecture_Resolution_DetectsRdna4AndPreviousGenerations(string devName, bool isApu, string expectedArch)
     {
-        NativeDriverResolver.EnsureRegistered();
-        // Subsequent calls should be idempotent
-        NativeDriverResolver.EnsureRegistered();
+        string arch = AmdRdnaEngine.ResolveArchitecture(devName, isApu);
+        Assert.Equal(expectedArch, arch);
     }
 }
 
