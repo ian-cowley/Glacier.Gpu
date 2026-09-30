@@ -10,15 +10,15 @@
 
     <!-- NuGet Package Properties -->
     <PackageId>Glacier.Gpu</PackageId>
-    <Version>1.0.7</Version>
+    <Version>1.0.8</Version>
     <Authors>Ian Cowley</Authors>
     <Company>Glacier High-Performance Ecosystem</Company>
-    <Description>Heterogeneous Bare-Metal GPU Compute Engine in C# .NET 10. Bypasses CUDA runtime to execute raw SASS machine code, persistent ring buffer megakernels (&lt;350ns dispatch), and AMD RDNA 3.5 zero-copy APU unified memory.</Description>
+    <Description>Heterogeneous Bare-Metal GPU Compute Engine in C# .NET 10 with Glacier.Compute foundational integration. Bypasses CUDA runtime to execute raw SASS machine code, persistent ring buffer megakernels (&lt;350ns dispatch), and AMD RDNA 3.5 zero-copy APU unified memory.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/ian-cowley/Glacier.Gpu</PackageProjectUrl>
     <RepositoryUrl>https://github.com/ian-cowley/Glacier.Gpu.git</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
-    <PackageTags>gpu;cuda;sass;rocm;hip;rdna;bare-metal;ring-buffer;high-performance;simd;net10;glacier</PackageTags>
+    <PackageTags>gpu;cuda;sass;compute;rocm;hip;rdna;bare-metal;ring-buffer;high-performance;simd;net10;glacier</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 
@@ -27,6 +27,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="Glacier.Compute" Version="1.0.0" />
     <PackageReference Include="Vortice.D3DCompiler" Version="3.8.3" />
     <PackageReference Include="Vortice.Direct3D12" Version="3.8.3" />
   </ItemGroup>
