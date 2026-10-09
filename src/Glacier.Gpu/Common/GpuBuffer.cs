@@ -75,6 +75,8 @@ public sealed unsafe class GpuBuffer<T> : IDisposable where T : unmanaged
     /// </summary>
     public static void EnsureCudaContext()
     {
+        if (!CuDriver.IsAvailable()) return;
+
         if (CuDriver.CtxGetCurrent(out IntPtr current) == 0 && current != IntPtr.Zero)
         {
             return;
@@ -167,20 +169,29 @@ public sealed unsafe class GpuBuffer<T> : IDisposable where T : unmanaged
         {
             if (_deviceType == GpuDeviceType.NvidiaDiscrete)
             {
-                EnsureCudaContext();
-                if (stream == IntPtr.Zero)
-                {
-                    CuDriver.Check(CuDriver.MemcpyHtoD(_devicePointer, (IntPtr)pHost, _sizeInBytes), "cuMemcpyHtoD");
-                }
-                else
-                {
-                    CuDriver.Check(CuDriver.MemcpyHtoDAsync(_devicePointer, (IntPtr)pHost, _sizeInBytes, stream), "cuMemcpyHtoDAsync");
-                }
+                CopyFromHostCuda(pHost, stream);
             }
             else
             {
                 throw new NotSupportedException($"Direct host copy not supported for device type {_deviceType}.");
             }
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void CopyFromHostCuda(T* pHost, IntPtr stream)
+    {
+        if (!CuDriver.IsAvailable())
+            throw new PlatformNotSupportedException("NVIDIA CUDA driver is unavailable.");
+
+        EnsureCudaContext();
+        if (stream == IntPtr.Zero)
+        {
+            CuDriver.Check(CuDriver.MemcpyHtoD(_devicePointer, (IntPtr)pHost, _sizeInBytes), "cuMemcpyHtoD");
+        }
+        else
+        {
+            CuDriver.Check(CuDriver.MemcpyHtoDAsync(_devicePointer, (IntPtr)pHost, _sizeInBytes, stream), "cuMemcpyHtoDAsync");
         }
     }
 
@@ -197,20 +208,29 @@ public sealed unsafe class GpuBuffer<T> : IDisposable where T : unmanaged
         {
             if (_deviceType == GpuDeviceType.NvidiaDiscrete)
             {
-                EnsureCudaContext();
-                if (stream == IntPtr.Zero)
-                {
-                    CuDriver.Check(CuDriver.MemcpyDtoH((IntPtr)pHost, _devicePointer, _sizeInBytes), "cuMemcpyDtoH");
-                }
-                else
-                {
-                    CuDriver.Check(CuDriver.MemcpyDtoHAsync((IntPtr)pHost, _devicePointer, _sizeInBytes, stream), "cuMemcpyDtoHAsync");
-                }
+                CopyToHostCuda(pHost, stream);
             }
             else
             {
                 throw new NotSupportedException($"Direct host download not supported for device type {_deviceType}.");
             }
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void CopyToHostCuda(T* pHost, IntPtr stream)
+    {
+        if (!CuDriver.IsAvailable())
+            throw new PlatformNotSupportedException("NVIDIA CUDA driver is unavailable.");
+
+        EnsureCudaContext();
+        if (stream == IntPtr.Zero)
+        {
+            CuDriver.Check(CuDriver.MemcpyDtoH((IntPtr)pHost, _devicePointer, _sizeInBytes), "cuMemcpyDtoH");
+        }
+        else
+        {
+            CuDriver.Check(CuDriver.MemcpyDtoHAsync((IntPtr)pHost, _devicePointer, _sizeInBytes, stream), "cuMemcpyDtoHAsync");
         }
     }
 
@@ -227,19 +247,28 @@ public sealed unsafe class GpuBuffer<T> : IDisposable where T : unmanaged
 
         if (_deviceType == GpuDeviceType.NvidiaDiscrete && source.DeviceType == GpuDeviceType.NvidiaDiscrete)
         {
-            EnsureCudaContext();
-            if (stream == IntPtr.Zero)
-            {
-                CuDriver.Check(CuDriver.MemcpyDtoD(_devicePointer, source.DevicePointer, _sizeInBytes), "cuMemcpyDtoD");
-            }
-            else
-            {
-                CuDriver.Check(CuDriver.MemcpyDtoDAsync(_devicePointer, source.DevicePointer, _sizeInBytes, stream), "cuMemcpyDtoDAsync");
-            }
+            CopyFromDeviceCuda(source, stream);
         }
         else
         {
             throw new NotSupportedException($"GPU-to-GPU copy not supported between device types {_deviceType} and {source.DeviceType}.");
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void CopyFromDeviceCuda(GpuBuffer<T> source, IntPtr stream)
+    {
+        if (!CuDriver.IsAvailable())
+            throw new PlatformNotSupportedException("NVIDIA CUDA driver is unavailable.");
+
+        EnsureCudaContext();
+        if (stream == IntPtr.Zero)
+        {
+            CuDriver.Check(CuDriver.MemcpyDtoD(_devicePointer, source.DevicePointer, _sizeInBytes), "cuMemcpyDtoD");
+        }
+        else
+        {
+            CuDriver.Check(CuDriver.MemcpyDtoDAsync(_devicePointer, source.DevicePointer, _sizeInBytes, stream), "cuMemcpyDtoDAsync");
         }
     }
 
