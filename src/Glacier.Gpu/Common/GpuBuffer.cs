@@ -61,7 +61,7 @@ public sealed unsafe class GpuBuffer<T> : IDisposable where T : unmanaged
         _devicePointer = devicePointer;
         _gpuVirtualAddress = gpuVirtualAddress;
         _elementCount = elementCount;
-        _sizeInBytes = (nuint)(elementCount * sizeof(T));
+        _sizeInBytes = (nuint)((ulong)elementCount * (ulong)sizeof(T));
         _deviceType = deviceType;
         _freeAction = freeAction;
         _underlyingResource = underlyingResource;
@@ -116,7 +116,7 @@ public sealed unsafe class GpuBuffer<T> : IDisposable where T : unmanaged
 
         EnsureCudaContext();
 
-        nuint bytes = (nuint)(elementCount * sizeof(T));
+        nuint bytes = (nuint)((ulong)elementCount * (ulong)sizeof(T));
         int res = CuDriver.MemAlloc(out IntPtr dptr, bytes);
         if (res != 0 || dptr == IntPtr.Zero)
             throw new OutOfMemoryException($"Failed to allocate {bytes} bytes in CUDA VRAM. Error: {res}");
@@ -140,7 +140,7 @@ public sealed unsafe class GpuBuffer<T> : IDisposable where T : unmanaged
         if (elementCount < 0)
             throw new ArgumentOutOfRangeException(nameof(elementCount), "Element count must be non-negative.");
 
-        ulong bytes = (ulong)(elementCount * sizeof(T));
+        ulong bytes = (ulong)elementCount * (ulong)sizeof(T);
         var desc = ResourceDescription.Buffer(bytes, flags);
         var heapProps = new HeapProperties(HeapType.Default);
         var resource = device.CreateCommittedResource(heapProps, HeapFlags.None, desc, ResourceStates.Common);
