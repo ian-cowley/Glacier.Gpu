@@ -99,6 +99,10 @@ public static class CuDriver
     public static extern int MemFree(IntPtr dptr);
 
     [SuppressGCTransition]
+    [DllImport(CudaLib, EntryPoint = "cuMemGetInfo_v2")]
+    public static extern int MemGetInfo(out nuint free, out nuint total);
+
+    [SuppressGCTransition]
     [DllImport(CudaLib, EntryPoint = "cuMemHostAlloc")]
     public static extern int MemHostAlloc(out IntPtr pp, nuint bytesize, uint flags);
 
