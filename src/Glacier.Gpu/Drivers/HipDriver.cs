@@ -32,21 +32,26 @@ public static class HipDriver
         try
         {
             NativeDriverResolver.EnsureRegistered();
+            bool loaded = false;
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
-                return (NativeLibrary.TryLoad("amdhip64.dll", out IntPtr handle) ||
-                        NativeLibrary.TryLoad("amdhip64_6.dll", out handle) ||
-                        NativeLibrary.TryLoad("amdhip64_7.dll", out handle)) && handle != IntPtr.Zero;
+                loaded = (NativeLibrary.TryLoad("amdhip64.dll", out IntPtr handle) ||
+                          NativeLibrary.TryLoad("amdhip64_6.dll", out handle) ||
+                          NativeLibrary.TryLoad("amdhip64_7.dll", out handle)) && handle != IntPtr.Zero;
             }
             else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
             {
-                return (NativeLibrary.TryLoad("libamdhip64.so", out IntPtr handle) ||
-                        NativeLibrary.TryLoad("libamdhip64.so.7", out handle) ||
-                        NativeLibrary.TryLoad("libamdhip64.so.6", out handle) ||
-                        NativeLibrary.TryLoad("/opt/rocm/lib/libamdhip64.so", out handle) ||
-                        NativeLibrary.TryLoad("/opt/rocm-7.2.0/lib/libamdhip64.so", out handle)) && handle != IntPtr.Zero;
+                loaded = (NativeLibrary.TryLoad("libamdhip64.so", out IntPtr handle) ||
+                          NativeLibrary.TryLoad("libamdhip64.so.7", out handle) ||
+                          NativeLibrary.TryLoad("libamdhip64.so.6", out handle) ||
+                          NativeLibrary.TryLoad("/opt/rocm/lib/libamdhip64.so", out handle) ||
+                          NativeLibrary.TryLoad("/opt/rocm-7.2.0/lib/libamdhip64.so", out handle)) && handle != IntPtr.Zero;
             }
-            return false;
+
+            if (!loaded)
+                return false;
+
+            return Init(0) == 0 && GetDeviceCount(out int devCount) == 0 && devCount > 0;
         }
         catch
         {
