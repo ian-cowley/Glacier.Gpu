@@ -1,13 +1,15 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 
 namespace Glacier.Gpu.Drivers;
 
 /// <summary>
-/// Direct P/Invoke bindings for Microsoft DirectML (DirectML.dll) and DirectX 12 (d3d12.dll).
-/// Native Windows GPU compute driver for AMD Radeon, Intel Arc/Xe, and NVIDIA GPUs.
-/// Zero external C++ runtime dependencies; ships as part of Windows 10/11.
+/// Direct hardware adapter discovery for Microsoft DirectML (DirectML.dll) and DirectX 12 (d3d12.dll).
+/// Native Windows GPU compute probe for AMD Radeon, Intel Arc/Xe, and NVIDIA GPUs.
+/// Uses Native AOT-safe DXGI enumeration without reflection or RCWs.
 /// </summary>
 public static class DirectMlDriver
 {
@@ -50,6 +52,8 @@ public static class DirectMlDriver
 
     public static IReadOnlyList<DxgiAdapterInfo> GetAdapters() => _adapters.Value;
 
+    public static bool HasHardwareAdapter => GetAdapters().Count > 0;
+
     public static bool HasIntelGpu
     {
         get
@@ -89,124 +93,54 @@ public static class DirectMlDriver
 
     private static List<DxgiAdapterInfo> EnumerateAdapters()
     {
+        if (!OperatingSystem.IsWindows())
+            return new List<DxgiAdapterInfo>();
+
+        return EnumerateAdaptersWindows();
+    }
+
+    [SupportedOSPlatform("windows")]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static List<DxgiAdapterInfo> EnumerateAdaptersWindows()
+    {
         var list = new List<DxgiAdapterInfo>();
-        if (!OperatingSystem.IsWindows()) return list;
-
-        var factoryGuid = new Guid("770aae78-f26f-4dba-a829-253c83d1b387"); // IID_IDXGIFactory1
-        int hr = CreateDXGIFactory1(ref factoryGuid, out IntPtr factoryPtr);
-        if (hr != 0 || factoryPtr == IntPtr.Zero) return list;
-
         try
         {
-            var factory = (IDXGIFactory1)Marshal.GetObjectForIUnknown(factoryPtr);
-            uint index = 0;
-
-            while (true)
+            using var factory = Vortice.DXGI.DXGI.CreateDXGIFactory1<Vortice.DXGI.IDXGIFactory1>();
+            for (uint index = 0; factory.EnumAdapters1(index, out Vortice.DXGI.IDXGIAdapter1 adapter).Success; index++)
             {
-                hr = factory.EnumAdapters1(index, out IDXGIAdapter1 adapter);
-                if (hr != 0 || adapter == null) break;
-
-                try
+                using (adapter)
                 {
-                    hr = adapter.GetDesc1(out DXGI_ADAPTER_DESC1 desc);
-                    if (hr == 0)
+                    var desc = adapter.Description1;
+                    if ((desc.Flags & Vortice.DXGI.AdapterFlags.Software) != 0)
+                        continue;
+
+                    string descStr = desc.Description?.Trim() ?? string.Empty;
+                    string lower = descStr.ToLowerInvariant();
+                    ulong dedicatedVram = (ulong)desc.DedicatedVideoMemory;
+                    ulong sharedMem = (ulong)desc.SharedSystemMemory;
+                    bool isIntegrated = lower.Contains("graphics") || lower.Contains("890m") ||
+                                        lower.Contains("780m") || lower.Contains("680m") ||
+                                        lower.Contains("iris") || lower.Contains("uhd") ||
+                                        (dedicatedVram == 0 && sharedMem > 0);
+
+                    list.Add(new DxgiAdapterInfo
                     {
-                        // Skip software rasterizer (flags & 2)
-                        if ((desc.Flags & 2) == 0)
-                        {
-                            string descStr = desc.Description.Trim();
-                            string lower = descStr.ToLowerInvariant();
-                            bool isIntegrated = lower.Contains("graphics") || lower.Contains("890m") ||
-                                                lower.Contains("780m") || lower.Contains("680m") ||
-                                                lower.Contains("iris") || lower.Contains("uhd") ||
-                                                (desc.DedicatedVideoMemory == 0 && desc.SharedSystemMemory > 0);
-
-                            list.Add(new DxgiAdapterInfo
-                            {
-                                Index = (int)index,
-                                Description = descStr,
-                                VendorId = desc.VendorId,
-                                DedicatedVramBytes = (ulong)desc.DedicatedVideoMemory,
-                                SharedSystemMemoryBytes = (ulong)desc.SharedSystemMemory,
-                                IsIntegrated = isIntegrated
-                            });
-                        }
-                    }
+                        Index = (int)index,
+                        Description = descStr,
+                        VendorId = (uint)desc.VendorId,
+                        DedicatedVramBytes = dedicatedVram,
+                        SharedSystemMemoryBytes = sharedMem,
+                        IsIntegrated = isIntegrated
+                    });
                 }
-                finally
-                {
-                    Marshal.ReleaseComObject(adapter);
-                }
-                index++;
             }
         }
-        catch { }
-        finally
+        catch
         {
-            Marshal.Release(factoryPtr);
+            // Headless or unsupported DXGI environment
         }
 
         return list;
-    }
-
-    [DllImport(DxgiLib, ExactSpelling = true)]
-    private static extern int CreateDXGIFactory1(ref Guid riid, out IntPtr ppFactory);
-
-    [ComImport]
-    [Guid("770aae78-f26f-4dba-a829-253c83d1b387")]
-    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    private interface IDXGIFactory1
-    {
-        int SetPrivateData(ref Guid Name, uint DataSize, IntPtr pData);
-        int SetPrivateDataInterface(ref Guid Name, [MarshalAs(UnmanagedType.IUnknown)] object pUnknown);
-        int GetPrivateData(ref Guid Name, ref uint pDataSize, IntPtr pData);
-        int GetParent(ref Guid riid, out IntPtr ppParent);
-        int EnumAdapters(uint Adapter, out IntPtr ppAdapter);
-        int MakeWindowAssociation(IntPtr WindowHandle, uint Flags);
-        int GetWindowAssociation(out IntPtr pWindowHandle);
-        int CreateSwapChain(IntPtr pDevice, IntPtr pDesc, out IntPtr ppSwapChain);
-        int CreateSoftwareAdapter(IntPtr Module, out IntPtr ppAdapter);
-
-        [PreserveSig]
-        int EnumAdapters1(uint Adapter, out IDXGIAdapter1 ppAdapter);
-        [PreserveSig]
-        int IsCurrent();
-    }
-
-    [ComImport]
-    [Guid("29038f61-3839-4626-91fd-086879011a05")]
-    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    private interface IDXGIAdapter1
-    {
-        int SetPrivateData(ref Guid Name, uint DataSize, IntPtr pData);
-        int SetPrivateDataInterface(ref Guid Name, [MarshalAs(UnmanagedType.IUnknown)] object pUnknown);
-        int GetPrivateData(ref Guid Name, ref uint pDataSize, IntPtr pData);
-        int GetParent(ref Guid riid, out IntPtr ppParent);
-
-        [PreserveSig]
-        int EnumOutputs(uint Output, out IntPtr ppOutput);
-        [PreserveSig]
-        int GetDesc(IntPtr pDesc);
-        [PreserveSig]
-        int CheckInterfaceSupport(ref Guid InterfaceName, out long pUMDVersion);
-
-        [PreserveSig]
-        int GetDesc1(out DXGI_ADAPTER_DESC1 pDesc);
-    }
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    private struct DXGI_ADAPTER_DESC1
-    {
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
-        public string Description;
-        public uint VendorId;
-        public uint DeviceId;
-        public uint SubSysId;
-        public uint Revision;
-        public nuint DedicatedVideoMemory;
-        public nuint DedicatedSystemMemory;
-        public nuint SharedSystemMemory;
-        public long AdapterLuid;
-        public uint Flags;
     }
 }

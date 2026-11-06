@@ -5,16 +5,18 @@ using System.Text;
 namespace Glacier.Gpu.Drivers;
 
 /// <summary>
-/// Direct P/Invoke bindings for the NVIDIA CUDA Driver API (nvcuda.dll).
-/// Bypasses cudart64.dll runtime overhead.
+/// Direct P/Invoke bindings for the NVIDIA CUDA Driver API (nvcuda.dll / libcuda.so.1).
+/// Bypasses cudart64.dll runtime overhead with Native AOT blittable signatures.
 /// </summary>
-public static class CuDriver
+public static unsafe class CuDriver
 {
     private const string CudaLib = "nvcuda.dll";
 
     public const uint CU_MEMHOSTALLOC_PORTABLE = 0x01;
     public const uint CU_MEMHOSTALLOC_DEVICEMAP = 0x02;
     public const uint CU_MEMHOSTALLOC_WRITECOMBINED = 0x04;
+    public const uint CU_STREAM_DEFAULT = 0x00;
+    public const uint CU_STREAM_NON_BLOCKING = 0x01;
 
     static CuDriver()
     {
@@ -26,16 +28,21 @@ public static class CuDriver
         try
         {
             NativeDriverResolver.EnsureRegistered();
+            bool loaded = false;
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
-                return NativeLibrary.TryLoad("nvcuda.dll", out IntPtr handle) && handle != IntPtr.Zero;
+                loaded = NativeLibrary.TryLoad("nvcuda.dll", out IntPtr handle) && handle != IntPtr.Zero;
             }
             else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
             {
-                return (NativeLibrary.TryLoad("libcuda.so.1", out IntPtr handle) ||
-                        NativeLibrary.TryLoad("libcuda.so", out handle)) && handle != IntPtr.Zero;
+                loaded = (NativeLibrary.TryLoad("libcuda.so.1", out IntPtr handle) ||
+                          NativeLibrary.TryLoad("libcuda.so", out handle)) && handle != IntPtr.Zero;
             }
-            return false;
+
+            if (!loaded)
+                return false;
+
+            return Init(0) == 0 && DeviceGetCount(out int count) == 0 && count > 0;
         }
         catch
         {
@@ -58,7 +65,17 @@ public static class CuDriver
     public static extern int DeviceGet(out int device, int ordinal);
 
     [DllImport(CudaLib, EntryPoint = "cuDeviceGetName")]
-    public static extern int DeviceGetName(byte[] name, int len, int dev);
+    public static extern int DeviceGetName(byte* name, int len, int dev);
+
+    public static int DeviceGetName(byte[] name, int len, int dev)
+    {
+        ArgumentNullException.ThrowIfNull(name);
+        int safeLen = Math.Min(len, name.Length);
+        fixed (byte* pName = name)
+        {
+            return DeviceGetName(pName, safeLen, dev);
+        }
+    }
 
     [DllImport(CudaLib, EntryPoint = "cuDeviceTotalMem_v2")]
     public static extern int DeviceTotalMem(out nuint bytes, int dev);
@@ -69,76 +86,81 @@ public static class CuDriver
     [DllImport(CudaLib, EntryPoint = "cuCtxCreate_v2")]
     public static extern int CtxCreate(out IntPtr pctx, uint flags, int dev);
 
-    [SuppressGCTransition]
     [DllImport(CudaLib, EntryPoint = "cuCtxSetCurrent")]
     public static extern int CtxSetCurrent(IntPtr ctx);
 
-    [SuppressGCTransition]
     [DllImport(CudaLib, EntryPoint = "cuCtxGetCurrent")]
     public static extern int CtxGetCurrent(out IntPtr pctx);
 
     [DllImport(CudaLib, EntryPoint = "cuCtxDestroy_v2")]
     public static extern int CtxDestroy(IntPtr ctx);
 
-    [SuppressGCTransition]
     [DllImport(CudaLib, EntryPoint = "cuCtxSynchronize")]
     public static extern int CtxSynchronize();
 
     [DllImport(CudaLib, EntryPoint = "cuModuleLoadData")]
-    public static extern int ModuleLoadData(out IntPtr module, byte[] image);
+    public static extern int ModuleLoadData(out IntPtr module, void* image);
+
+    public static int ModuleLoadData(out IntPtr module, byte[] image)
+    {
+        ArgumentNullException.ThrowIfNull(image);
+        fixed (byte* pImage = image)
+        {
+            return ModuleLoadData(out module, pImage);
+        }
+    }
 
     [DllImport(CudaLib, EntryPoint = "cuModuleGetFunction")]
-    public static extern int ModuleGetFunction(out IntPtr hfunc, IntPtr hmod, string name);
+    public static extern int ModuleGetFunction(out IntPtr hfunc, IntPtr hmod, byte* name);
 
-    [SuppressGCTransition]
+    public static int ModuleGetFunction(out IntPtr hfunc, IntPtr hmod, string name)
+    {
+        ArgumentNullException.ThrowIfNull(name);
+        int byteCount = Encoding.UTF8.GetByteCount(name);
+        byte[] utf8 = new byte[byteCount + 1];
+        Encoding.UTF8.GetBytes(name, 0, name.Length, utf8, 0);
+        fixed (byte* pName = utf8)
+        {
+            return ModuleGetFunction(out hfunc, hmod, pName);
+        }
+    }
+
     [DllImport(CudaLib, EntryPoint = "cuMemAlloc_v2")]
     public static extern int MemAlloc(out IntPtr dptr, nuint bytesize);
 
-    [SuppressGCTransition]
     [DllImport(CudaLib, EntryPoint = "cuMemFree_v2")]
     public static extern int MemFree(IntPtr dptr);
 
-    [SuppressGCTransition]
     [DllImport(CudaLib, EntryPoint = "cuMemGetInfo_v2")]
     public static extern int MemGetInfo(out nuint free, out nuint total);
 
-    [SuppressGCTransition]
     [DllImport(CudaLib, EntryPoint = "cuMemHostAlloc")]
     public static extern int MemHostAlloc(out IntPtr pp, nuint bytesize, uint flags);
 
-    [SuppressGCTransition]
     [DllImport(CudaLib, EntryPoint = "cuMemFreeHost")]
     public static extern int MemFreeHost(IntPtr p);
 
-    [SuppressGCTransition]
     [DllImport(CudaLib, EntryPoint = "cuMemHostGetDevicePointer_v2")]
     public static extern int MemHostGetDevicePointer(out IntPtr pdptr, IntPtr p, uint flags);
 
-    [SuppressGCTransition]
     [DllImport(CudaLib, EntryPoint = "cuMemcpyHtoD_v2")]
     public static extern int MemcpyHtoD(IntPtr dstDevice, IntPtr srcHost, nuint byteCount);
 
-    [SuppressGCTransition]
     [DllImport(CudaLib, EntryPoint = "cuMemcpyHtoDAsync_v2")]
     public static extern int MemcpyHtoDAsync(IntPtr dstDevice, IntPtr srcHost, nuint byteCount, IntPtr hStream);
 
-    [SuppressGCTransition]
     [DllImport(CudaLib, EntryPoint = "cuMemcpyDtoH_v2")]
     public static extern int MemcpyDtoH(IntPtr dstHost, IntPtr srcDevice, nuint byteCount);
 
-    [SuppressGCTransition]
     [DllImport(CudaLib, EntryPoint = "cuMemcpyDtoHAsync_v2")]
     public static extern int MemcpyDtoHAsync(IntPtr dstHost, IntPtr srcDevice, nuint byteCount, IntPtr hStream);
 
-    [SuppressGCTransition]
     [DllImport(CudaLib, EntryPoint = "cuMemcpyDtoD_v2")]
     public static extern int MemcpyDtoD(IntPtr dstDevice, IntPtr srcDevice, nuint byteCount);
 
-    [SuppressGCTransition]
     [DllImport(CudaLib, EntryPoint = "cuMemcpyDtoDAsync_v2")]
     public static extern int MemcpyDtoDAsync(IntPtr dstDevice, IntPtr srcDevice, nuint byteCount, IntPtr hStream);
 
-    [SuppressGCTransition]
     [DllImport(CudaLib, EntryPoint = "cuLaunchKernel")]
     public static extern int LaunchKernel(
         IntPtr f,
@@ -150,18 +172,23 @@ public static class CuDriver
     [DllImport(CudaLib, EntryPoint = "cuStreamCreate")]
     public static extern int StreamCreate(out IntPtr phStream, uint flags);
 
-    [SuppressGCTransition]
     [DllImport(CudaLib, EntryPoint = "cuStreamSynchronize")]
     public static extern int StreamSynchronize(IntPtr hStream);
+
+    [DllImport(CudaLib, EntryPoint = "cuStreamQuery")]
+    public static extern int StreamQuery(IntPtr hStream);
 
     [DllImport(CudaLib, EntryPoint = "cuStreamDestroy_v2")]
     public static extern int StreamDestroy(IntPtr hStream);
 
     public static string GetDeviceName(int device)
     {
-        var buf = new byte[256];
-        DeviceGetName(buf, buf.Length, device);
-        return Encoding.ASCII.GetString(buf).TrimEnd('\0');
+        byte* buf = stackalloc byte[256];
+        NativeMemory.Clear(buf, 256);
+        DeviceGetName(buf, 256, device);
+        int len = 0;
+        while (len < 256 && buf[len] != 0) len++;
+        return Encoding.ASCII.GetString(buf, len);
     }
 
     public static string GetComputeCapability(int device)

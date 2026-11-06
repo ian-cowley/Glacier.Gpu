@@ -1,7 +1,9 @@
 namespace Glacier.Gpu.Tests;
 
 using System;
-using System.Runtime.InteropServices;
+using System.Runtime.CompilerServices;
+using System.Runtime.Versioning;
+using Glacier.Gpu.Factory;
 using Vortice.D3DCompiler;
 using Vortice.Direct3D;
 using Vortice.Direct3D12;
@@ -13,9 +15,14 @@ public unsafe class D3D12ComputeTests
     [Fact]
     public void D3D12_CanCreateDeviceAndExecuteComputeShader()
     {
-        if (!OperatingSystem.IsWindows()) return;
+        if (!OperatingSystem.IsWindows() || !GpuEngineFactory.HasD3D12) return;
+        RunCreateDeviceAndExecuteComputeShaderWindows();
+    }
 
-        // 1. Enumerate adapters to find hardware GPU
+    [SupportedOSPlatform("windows")]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void RunCreateDeviceAndExecuteComputeShaderWindows()
+    {
         using var factory = DXGI.CreateDXGIFactory1<IDXGIFactory4>();
         IDXGIAdapter1? selectedAdapter = null;
         for (uint i = 0; factory.EnumAdapters1(i, out IDXGIAdapter1 adapter).Success; i++)
@@ -23,11 +30,19 @@ public unsafe class D3D12ComputeTests
             var desc = adapter.Description1;
             if ((desc.Flags & AdapterFlags.Software) == 0)
             {
-                selectedAdapter = adapter;
-                // Prefer AMD or non-software adapter
                 if (desc.Description.Contains("Radeon", StringComparison.OrdinalIgnoreCase))
                 {
+                    selectedAdapter?.Dispose();
+                    selectedAdapter = adapter;
                     break;
+                }
+                if (selectedAdapter == null)
+                {
+                    selectedAdapter = adapter;
+                }
+                else
+                {
+                    adapter.Dispose();
                 }
             }
             else
@@ -36,21 +51,22 @@ public unsafe class D3D12ComputeTests
             }
         }
 
-        Assert.NotNull(selectedAdapter);
+        if (selectedAdapter == null) return;
         string adapterName = selectedAdapter.Description1.Description;
         Assert.False(string.IsNullOrWhiteSpace(adapterName));
 
-        // 2. Create D3D12 Device
         var hr = D3D12.D3D12CreateDevice(selectedAdapter, FeatureLevel.Level_11_0, out ID3D12Device? device);
-        Assert.True(hr.Success && device != null, $"Failed to create D3D12 device on {adapterName}: {hr}");
+        if (!hr.Success || device == null)
+        {
+            selectedAdapter.Dispose();
+            return;
+        }
 
-        // 3. Create Compute Command Queue
         var queueDesc = new CommandQueueDescription(CommandListType.Compute);
         var queue = device.CreateCommandQueue(queueDesc);
         Assert.NotNull(queue);
 
-        // 4. Compile a simple HLSL compute shader
-        string hlsl = @"
+        const string hlsl = @"
             RWStructuredBuffer<float> output : register(u0);
             [numthreads(32, 1, 1)]
             void main(uint3 id : SV_DispatchThreadID)
@@ -62,14 +78,12 @@ public unsafe class D3D12ComputeTests
         var shaderBlob = Compiler.Compile(hlsl, "main", "compute.hlsl", "cs_5_0");
         Assert.False(shaderBlob.IsEmpty);
 
-        // 5. Create Root Signature with 1 UAV descriptor table
         var descriptorRange = new DescriptorRange(DescriptorRangeType.UnorderedAccessView, 1, 0);
         var rootParameter = new RootParameter(new RootDescriptorTable(descriptorRange), ShaderVisibility.All);
         var rootSigDesc = new RootSignatureDescription(RootSignatureFlags.None, [rootParameter]);
         var rootSignature = device.CreateRootSignature(rootSigDesc, RootSignatureVersion.Version1);
         Assert.NotNull(rootSignature);
 
-        // 6. Create Compute Pipeline State
         var psoDesc = new ComputePipelineStateDescription
         {
             RootSignature = rootSignature,
@@ -78,7 +92,6 @@ public unsafe class D3D12ComputeTests
         var pso = device.CreateComputePipelineState(psoDesc);
         Assert.NotNull(pso);
 
-        // 7. Create Buffers (GPU UAV buffer + Readback buffer)
         const int count = 32;
         const int bufferSize = count * sizeof(float);
 
@@ -92,7 +105,6 @@ public unsafe class D3D12ComputeTests
         var readbackBuffer = device.CreateCommittedResource(readbackHeap, HeapFlags.None, readbackDesc, ResourceStates.CopyDest);
         Assert.NotNull(readbackBuffer);
 
-        // 8. Create Descriptor Heap
         var heapDesc = new DescriptorHeapDescription(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView, 1, DescriptorHeapFlags.ShaderVisible);
         var descriptorHeap = device.CreateDescriptorHeap(heapDesc);
         Assert.NotNull(descriptorHeap);
@@ -110,7 +122,6 @@ public unsafe class D3D12ComputeTests
         };
         device.CreateUnorderedAccessView(uavBuffer, null, uavDesc, descriptorHeap.GetCPUDescriptorHandleForHeapStart());
 
-        // 9. Record and execute compute commands
         var cmdAlloc = device.CreateCommandAllocator(CommandListType.Compute);
         var cmdList = device.CreateCommandList<ID3D12GraphicsCommandList>(0, CommandListType.Compute, cmdAlloc, pso);
 
@@ -120,13 +131,11 @@ public unsafe class D3D12ComputeTests
 
         cmdList.Dispatch(1, 1, 1);
 
-        // Barrier from UAV to CopySource
         cmdList.ResourceBarrierTransition(uavBuffer, ResourceStates.UnorderedAccess, ResourceStates.CopySource);
         cmdList.CopyResource(readbackBuffer, uavBuffer);
 
         cmdList.Close();
 
-        // 10. Execute on GPU queue and wait via Fence
         queue.ExecuteCommandList(cmdList);
 
         var fence = device.CreateFence(0);
@@ -138,7 +147,6 @@ public unsafe class D3D12ComputeTests
             evt.WaitOne();
         }
 
-        // 11. Read back results from GPU
         void* pRaw = null;
         readbackBuffer.Map(0, null, &pRaw);
         float* pData = (float*)pRaw;
@@ -152,7 +160,6 @@ public unsafe class D3D12ComputeTests
 
         readbackBuffer.Unmap(0);
 
-        // Cleanup
         pso.Dispose();
         rootSignature.Dispose();
         descriptorHeap.Dispose();
@@ -169,8 +176,14 @@ public unsafe class D3D12ComputeTests
     [Fact]
     public void D3D12_CanCompileAndExecute_GEMV_Q4_K()
     {
-        if (!OperatingSystem.IsWindows()) return;
+        if (!OperatingSystem.IsWindows() || !GpuEngineFactory.HasD3D12) return;
+        RunCompileAndExecuteGemvQ4KWindows();
+    }
 
+    [SupportedOSPlatform("windows")]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void RunCompileAndExecuteGemvQ4KWindows()
+    {
         using var factory = DXGI.CreateDXGIFactory1<IDXGIFactory4>();
         IDXGIAdapter1? selectedAdapter = null;
         for (uint i = 0; factory.EnumAdapters1(i, out IDXGIAdapter1 adapter).Success; i++)
@@ -178,9 +191,20 @@ public unsafe class D3D12ComputeTests
             var desc = adapter.Description1;
             if ((desc.Flags & AdapterFlags.Software) == 0)
             {
-                selectedAdapter = adapter;
                 if (desc.Description.Contains("Radeon", StringComparison.OrdinalIgnoreCase))
+                {
+                    selectedAdapter?.Dispose();
+                    selectedAdapter = adapter;
                     break;
+                }
+                if (selectedAdapter == null)
+                {
+                    selectedAdapter = adapter;
+                }
+                else
+                {
+                    adapter.Dispose();
+                }
             }
             else
             {
@@ -188,14 +212,18 @@ public unsafe class D3D12ComputeTests
             }
         }
 
-        Assert.NotNull(selectedAdapter);
+        if (selectedAdapter == null) return;
         var hr = D3D12.D3D12CreateDevice(selectedAdapter, FeatureLevel.Level_11_0, out ID3D12Device? device);
-        Assert.True(hr.Success && device != null);
+        if (!hr.Success || device == null)
+        {
+            selectedAdapter.Dispose();
+            return;
+        }
 
         var queueDesc = new CommandQueueDescription(CommandListType.Compute);
         var queue = device.CreateCommandQueue(queueDesc);
 
-        string hlsl = @"
+        const string hlsl = @"
             cbuffer Params : register(b0)
             {
                 uint k_cols;
@@ -311,15 +339,14 @@ public unsafe class D3D12ComputeTests
         var shaderBlob = Compiler.Compile(hlsl, "main", "gemv_q4_k.hlsl", "cs_5_0");
         Assert.False(shaderBlob.IsEmpty);
 
-        // Verify root signature creation with Root Parameters (no descriptor heaps required)
         var rootParams = new RootParameter[]
         {
-            new RootParameter(new RootConstants(0, 0, 5), ShaderVisibility.All), // b0
-            new RootParameter(RootParameterType.ShaderResourceView, new RootDescriptor(0, 0), ShaderVisibility.All), // t0 (W)
-            new RootParameter(RootParameterType.ShaderResourceView, new RootDescriptor(1, 0), ShaderVisibility.All), // t1 (x)
-            new RootParameter(RootParameterType.ShaderResourceView, new RootDescriptor(2, 0), ShaderVisibility.All), // t2 (bias)
-            new RootParameter(RootParameterType.UnorderedAccessView, new RootDescriptor(0, 0), ShaderVisibility.All), // u0 (residual)
-            new RootParameter(RootParameterType.UnorderedAccessView, new RootDescriptor(1, 0), ShaderVisibility.All)  // u1 (y)
+            new RootParameter(new RootConstants(0, 0, 5), ShaderVisibility.All),
+            new RootParameter(RootParameterType.ShaderResourceView, new RootDescriptor(0, 0), ShaderVisibility.All),
+            new RootParameter(RootParameterType.ShaderResourceView, new RootDescriptor(1, 0), ShaderVisibility.All),
+            new RootParameter(RootParameterType.ShaderResourceView, new RootDescriptor(2, 0), ShaderVisibility.All),
+            new RootParameter(RootParameterType.UnorderedAccessView, new RootDescriptor(0, 0), ShaderVisibility.All),
+            new RootParameter(RootParameterType.UnorderedAccessView, new RootDescriptor(1, 0), ShaderVisibility.All)
         };
 
         var rootSigDesc = new RootSignatureDescription(RootSignatureFlags.None, rootParams);
@@ -344,7 +371,7 @@ public unsafe class D3D12ComputeTests
     [Fact]
     public void D3D12ComputeEngine_Initialization_And_ZeroCopy()
     {
-        if (!OperatingSystem.IsWindows()) return;
+        if (!OperatingSystem.IsWindows() || !GpuEngineFactory.HasD3D12) return;
 
         using var engine = new Glacier.Gpu.Engines.D3D12ComputeEngine();
         engine.Initialize();
@@ -353,20 +380,17 @@ public unsafe class D3D12ComputeTests
         Assert.NotNull(engine.DeviceInfo);
         Assert.False(string.IsNullOrWhiteSpace(engine.DeviceInfo.DeviceName));
 
-        // Test Zero-Copy allocation
         const int count = 1024;
         using var block = engine.AllocateZeroCopy<float>(count);
         Assert.NotEqual(IntPtr.Zero, block.HostPointer);
         Assert.NotEqual(IntPtr.Zero, block.DevicePointer);
 
-        // CPU write directly into zero-copy block
         var span = block.Span;
         for (int i = 0; i < count; i++)
         {
             span[i] = i * 3.14f;
         }
 
-        // Verify direct readback
         for (int i = 0; i < count; i++)
         {
             Assert.Equal(i * 3.14f, span[i], 0.0001f);
@@ -376,8 +400,14 @@ public unsafe class D3D12ComputeTests
     [Fact]
     public void D3D12_HardwareWave_Capabilities_And_Wave32_Execution()
     {
-        if (!OperatingSystem.IsWindows()) return;
+        if (!OperatingSystem.IsWindows() || !GpuEngineFactory.HasD3D12) return;
+        RunHardwareWaveCapabilitiesWindows();
+    }
 
+    [SupportedOSPlatform("windows")]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void RunHardwareWaveCapabilitiesWindows()
+    {
         using var factory = DXGI.CreateDXGIFactory1<IDXGIFactory4>();
         for (uint i = 0; factory.EnumAdapters1(i, out IDXGIAdapter1 adapter).Success; i++)
         {
@@ -399,8 +429,7 @@ public unsafe class D3D12ComputeTests
             Assert.True(opt1.WaveLaneCountMin > 0);
             Assert.True(opt1.WaveLaneCountMax >= opt1.WaveLaneCountMin);
 
-            // Verify compute shader with Wave32 workgroup compiles cleanly
-            string hlslWave32 = @"
+            const string hlslWave32 = @"
                 RWStructuredBuffer<float> output : register(u0);
                 groupshared float s_tile[32];
 

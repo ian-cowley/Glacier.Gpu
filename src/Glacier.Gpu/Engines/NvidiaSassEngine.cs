@@ -1,6 +1,5 @@
 using System;
 using System.Diagnostics;
-using System.Runtime.InteropServices;
 using System.Threading;
 using Glacier.Gpu.Common;
 using Glacier.Gpu.Compilation;
@@ -10,8 +9,8 @@ using Glacier.Gpu.RingBuffer;
 namespace Glacier.Gpu.Engines;
 
 /// <summary>
-/// Hardware engine for NVIDIA GPUs (Ada Lovelace, Ampere, Turing).
-/// Bypasses CUDA runtime to execute raw SASS machine code and persistent ring buffer workers.
+/// Hardware engine for NVIDIA GPUs (Blackwell, Hopper, Ada Lovelace, Ampere, Turing).
+/// Bypasses CUDA runtime to execute raw SASS machine code and multi-slot persistent ring buffer workers on dedicated non-blocking streams.
 /// </summary>
 public sealed unsafe class NvidiaSassEngine : IGpuEngine
 {
@@ -23,11 +22,10 @@ public sealed unsafe class NvidiaSassEngine : IGpuEngine
     private IntPtr _fnVectorAdd;
     private IntPtr _fnVectorFma;
     private IntPtr _fnWorker;
+    private IntPtr _workerStream;
     private PersistentRingBuffer? _ringBuffer;
     private IntPtr _hostTaskPtr;
     private IntPtr _devTaskPtr;
-    private GCHandle _hWorkerParam;
-    private GCHandle _hWorkerArray;
     private GpuDeviceInfo? _deviceInfo;
     private bool _initialized;
     private bool _disposed;
@@ -39,8 +37,11 @@ public sealed unsafe class NvidiaSassEngine : IGpuEngine
 
     public void Initialize()
     {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_initialized) return;
+
         if (!CuDriver.IsAvailable())
-            throw new PlatformNotSupportedException("NVIDIA CUDA driver (nvcuda.dll) is not available on this system.");
+            throw new PlatformNotSupportedException("NVIDIA CUDA driver (nvcuda.dll / libcuda.so.1) is not available on this system.");
 
         CuDriver.Check(CuDriver.Init(0), "cuInit");
         CuDriver.Check(CuDriver.DeviceGetCount(out int count), "cuDeviceGetCount");
@@ -70,7 +71,7 @@ public sealed unsafe class NvidiaSassEngine : IGpuEngine
         // Load or JIT compile kernels
         byte[] cubinAdd = KernelCache.GetOrCompile(arch, "VectorAdd", KernelSources.VectorAddPtx);
         byte[] cubinFma = KernelCache.GetOrCompile(arch, "VectorFma", KernelSources.VectorFmaPtx);
-        byte[] cubinWorker = KernelCache.GetOrCompile(arch, "PersistentWorker", KernelSources.PersistentWorkerPtx);
+        byte[] cubinWorker = KernelCache.GetOrCompile(arch, "PersistentWorker_v2", KernelSources.PersistentWorkerPtx);
 
         CuDriver.Check(CuDriver.ModuleLoadData(out _modAdd, cubinAdd), "cuModuleLoadData(VectorAdd)");
         CuDriver.Check(CuDriver.ModuleGetFunction(out _fnVectorAdd, _modAdd, "vector_add"), "cuModuleGetFunction(vector_add)");
@@ -94,73 +95,66 @@ public sealed unsafe class NvidiaSassEngine : IGpuEngine
 
         nuint bytes = (nuint)(count * sizeof(T));
         CuDriver.Check(CuDriver.MemHostAlloc(
-            out IntPtr hostPtr, 
-            bytes, 
-            CuDriver.CU_MEMHOSTALLOC_DEVICEMAP | CuDriver.CU_MEMHOSTALLOC_PORTABLE), 
+            out IntPtr hostPtr,
+            bytes,
+            CuDriver.CU_MEMHOSTALLOC_DEVICEMAP | CuDriver.CU_MEMHOSTALLOC_PORTABLE),
             "cuMemHostAlloc");
 
         CuDriver.Check(CuDriver.MemHostGetDevicePointer(out IntPtr devPtr, hostPtr, 0), "cuMemHostGetDevicePointer");
 
-        return new UnifiedMemoryBlock<T>(hostPtr, devPtr, count, p => CuDriver.MemFreeHost(p));
+        return new UnifiedMemoryBlock<T>(hostPtr, devPtr, count, p =>
+        {
+            if (_ctx != IntPtr.Zero) CuDriver.CtxSetCurrent(_ctx);
+            CuDriver.MemFreeHost(p);
+        });
     }
 
     /// <summary>
-    /// Measures traditional OS driver kernel launch latency via cuLaunchKernel (nvcuda.dll).
-    /// Typically 8 - 12 microseconds due to OS kernel driver submission overhead.
+    /// Measures traditional OS driver kernel launch latency via cuLaunchKernel (nvcuda.dll) with zero heap allocations.
     /// </summary>
     public double MeasureTraditionalLaunchLatency(int iterations = 100_000)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         CuDriver.CtxSetCurrent(_ctx);
-        int N = 1024;
-        nuint bytes = (nuint)(N * sizeof(float));
+        int n = 1024;
+        nuint bytes = (nuint)(n * sizeof(float));
 
         CuDriver.Check(CuDriver.MemAlloc(out IntPtr d_a, bytes), "cuMemAlloc");
         CuDriver.Check(CuDriver.MemAlloc(out IntPtr d_b, bytes), "cuMemAlloc");
         CuDriver.Check(CuDriver.MemAlloc(out IntPtr d_c, bytes), "cuMemAlloc");
 
-        IntPtr[] kernelParams = new IntPtr[4];
-        GCHandle hParam0 = GCHandle.Alloc(d_a, GCHandleType.Pinned);
-        GCHandle hParam1 = GCHandle.Alloc(d_b, GCHandleType.Pinned);
-        GCHandle hParam2 = GCHandle.Alloc(d_c, GCHandleType.Pinned);
-        GCHandle hParam3 = GCHandle.Alloc(N, GCHandleType.Pinned);
-
-        kernelParams[0] = hParam0.AddrOfPinnedObject();
-        kernelParams[1] = hParam1.AddrOfPinnedObject();
-        kernelParams[2] = hParam2.AddrOfPinnedObject();
-        kernelParams[3] = hParam3.AddrOfPinnedObject();
-        GCHandle hParamsArray = GCHandle.Alloc(kernelParams, GCHandleType.Pinned);
-        IntPtr pParams = hParamsArray.AddrOfPinnedObject();
-
-        // Warmup
-        CuDriver.LaunchKernel(_fnVectorAdd, 4, 1, 1, 256, 1, 1, 0, IntPtr.Zero, pParams, IntPtr.Zero);
-        CuDriver.CtxSynchronize();
-
-        var sw = Stopwatch.StartNew();
-        for (int i = 0; i < iterations; i++)
+        try
         {
-            CuDriver.LaunchKernel(_fnVectorAdd, 4, 1, 1, 256, 1, 1, 0, IntPtr.Zero, pParams, IntPtr.Zero);
+            void** pParams = stackalloc void*[4];
+            pParams[0] = &d_a;
+            pParams[1] = &d_b;
+            pParams[2] = &d_c;
+            pParams[3] = &n;
+
+            // Warmup
+            CuDriver.Check(CuDriver.LaunchKernel(_fnVectorAdd, 4, 1, 1, 256, 1, 1, 0, IntPtr.Zero, (IntPtr)pParams, IntPtr.Zero), "cuLaunchKernel(warmup)");
+            CuDriver.StreamSynchronize(IntPtr.Zero);
+
+            var sw = Stopwatch.StartNew();
+            for (int i = 0; i < iterations; i++)
+            {
+                CuDriver.LaunchKernel(_fnVectorAdd, 4, 1, 1, 256, 1, 1, 0, IntPtr.Zero, (IntPtr)pParams, IntPtr.Zero);
+            }
+            CuDriver.StreamSynchronize(IntPtr.Zero);
+            sw.Stop();
+
+            return sw.Elapsed.TotalMicroseconds / iterations;
         }
-        CuDriver.CtxSynchronize();
-        sw.Stop();
-
-        hParam0.Free();
-        hParam1.Free();
-        hParam2.Free();
-        hParam3.Free();
-        hParamsArray.Free();
-        CuDriver.MemFree(d_a);
-        CuDriver.MemFree(d_b);
-        CuDriver.MemFree(d_c);
-
-        return sw.Elapsed.TotalMicroseconds / iterations;
+        finally
+        {
+            CuDriver.MemFree(d_a);
+            CuDriver.MemFree(d_b);
+            CuDriver.MemFree(d_c);
+        }
     }
 
     /// <summary>
-    /// Measures CPU-to-GPU fire-and-forget enqueue latency vs round-trip synchronous latency.
-    /// </summary>
-    /// <summary>
-    /// Gets or initializes the persistent ring buffer worker on the GPU with up to 1024 threads.
+    /// Gets or initializes the multi-slot persistent ring buffer worker on a dedicated non-blocking CUDA stream.
     /// </summary>
     public PersistentRingBuffer GetOrCreateRingBuffer(int threadCount = 1024)
     {
@@ -180,217 +174,224 @@ public sealed unsafe class NvidiaSassEngine : IGpuEngine
             CuDriver.CU_MEMHOSTALLOC_DEVICEMAP | CuDriver.CU_MEMHOSTALLOC_PORTABLE),
             "cuMemHostAlloc");
         CuDriver.Check(CuDriver.MemHostGetDevicePointer(out _devTaskPtr, _hostTaskPtr, 0), "cuMemHostGetDevicePointer");
+        CuDriver.Check(CuDriver.StreamCreate(out _workerStream, CuDriver.CU_STREAM_NON_BLOCKING), "cuStreamCreate(non-blocking)");
 
-        _ringBuffer = new PersistentRingBuffer(_hostTaskPtr, _devTaskPtr, DefaultRingCapacity);
-
-        GpuWorkTask* task = (GpuWorkTask*)_hostTaskPtr;
-        task->TaskId = 0;
-        task->OpCode = (uint)TaskOpCode.Nop;
-        task->ElementCount = (uint)actualThreads;
-        task->Status = 1;
+        _ringBuffer = new PersistentRingBuffer(
+            _hostTaskPtr,
+            _devTaskPtr,
+            DefaultRingCapacity,
+            shutdownAction: () =>
+            {
+                if (_ctx != IntPtr.Zero && _workerStream != IntPtr.Zero)
+                {
+                    CuDriver.CtxSetCurrent(_ctx);
+                    CuDriver.StreamSynchronize(_workerStream);
+                }
+            },
+            disposeAction: () =>
+            {
+                if (_ctx != IntPtr.Zero)
+                {
+                    CuDriver.CtxSetCurrent(_ctx);
+                    if (_workerStream != IntPtr.Zero)
+                    {
+                        CuDriver.StreamDestroy(_workerStream);
+                        _workerStream = IntPtr.Zero;
+                    }
+                    if (_hostTaskPtr != IntPtr.Zero)
+                    {
+                        CuDriver.MemFreeHost(_hostTaskPtr);
+                        _hostTaskPtr = IntPtr.Zero;
+                        _devTaskPtr = IntPtr.Zero;
+                    }
+                }
+                _ringBuffer = null;
+            });
 
         IntPtr devTask = _devTaskPtr;
-        IntPtr* launchParams = stackalloc IntPtr[1];
-        launchParams[0] = (IntPtr)(&devTask);
+        uint ringMask = DefaultRingCapacity - 1;
+        void** launchParams = stackalloc void*[2];
+        launchParams[0] = &devTask;
+        launchParams[1] = &ringMask;
 
         CuDriver.Check(CuDriver.LaunchKernel(
             _fnWorker,
             1, 1, 1,
             (uint)actualThreads, 1, 1,
-            0, IntPtr.Zero,
+            0, _workerStream,
             (IntPtr)launchParams,
             IntPtr.Zero), "LaunchKernel(PersistentWorker)");
 
-        Thread.Sleep(2); // Let worker spin up
+        // Flush WDDM command queue immediately so the persistent worker starts executing on the SM without blocking CPU
+        CuDriver.StreamQuery(_workerStream);
+
+        // Warmup Nop task to confirm worker kernel is live on the SM before timing
+        _ringBuffer.SubmitAndWait(TaskOpCode.Nop, 0, 0, 0, 0, 0f, timeoutMs: 5000);
         return _ringBuffer;
     }
 
     /// <summary>
-    /// Measures CPU-to-GPU fire-and-forget enqueue latency vs round-trip synchronous latency across arbitrary vector sizes.
+    /// Measures genuine multi-slot PersistentRingBuffer Enqueue dispatch latency and SubmitAndWait round-trip latency across arbitrary vector sizes.
     /// </summary>
     public (double dispatchUs, double roundTripUs, bool verified, float sampleVal) MeasureRingBufferLatency(int iterations = 10_000, int elementCount = 256)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         CuDriver.CtxSetCurrent(_ctx);
-        int N = elementCount;
-        nuint bufferBytes = (nuint)(N * sizeof(float));
+        int n = Math.Max(1, elementCount);
+        nuint bufferBytes = (nuint)(n * sizeof(float));
 
-        // Allocate data buffers
         CuDriver.Check(CuDriver.MemAlloc(out IntPtr d_a, bufferBytes), "cuMemAlloc");
         CuDriver.Check(CuDriver.MemAlloc(out IntPtr d_b, bufferBytes), "cuMemAlloc");
         CuDriver.Check(CuDriver.MemAlloc(out IntPtr d_c, bufferBytes), "cuMemAlloc");
 
-        float[] initA = new float[N];
-        float[] initB = new float[N];
-        Array.Fill(initA, 10.0f);
-        Array.Fill(initB, 20.0f);
-
-        fixed (float* pA = initA, pB = initB)
+        try
         {
-            CuDriver.MemcpyHtoD(d_a, (IntPtr)pA, bufferBytes);
-            CuDriver.MemcpyHtoD(d_b, (IntPtr)pB, bufferBytes);
-        }
+            float[] initA = new float[n];
+            float[] initB = new float[n];
+            Array.Fill(initA, 10.0f);
+            Array.Fill(initB, 20.0f);
 
-        PersistentRingBuffer ring = GetOrCreateRingBuffer(1024);
-        GpuWorkTask* task = (GpuWorkTask*)ring.HostTaskPointer;
-        task->ElementCount = (uint)N;
-        task->BufferA = (ulong)d_a;
-        task->BufferB = (ulong)d_b;
-        task->BufferC = (ulong)d_c;
-
-        // 1. Enqueue latency benchmark (CPU writing tasks to ring buffer)
-        var swEnqueue = Stopwatch.StartNew();
-        for (uint i = 1; i <= (uint)iterations; i++)
-        {
-            task->OpCode = (uint)TaskOpCode.VectorAdd;
-            if (System.Runtime.Intrinsics.X86.Sse.IsSupported)
-                System.Runtime.Intrinsics.X86.Sse.StoreFence();
-            else
-                Thread.MemoryBarrier();
-            Volatile.Write(ref task->TaskId, i);
-        }
-        swEnqueue.Stop();
-        double dispatchUs = swEnqueue.Elapsed.TotalMicroseconds / iterations;
-
-        // 2. Synchronous round-trip turnaround
-        int roundTripIters = Math.Min(5000, iterations);
-        var swRoundTrip = Stopwatch.StartNew();
-        for (uint i = 1; i <= (uint)roundTripIters; i++)
-        {
-            task->OpCode = (uint)TaskOpCode.VectorAdd;
-            task->Status = 0;
-            if (System.Runtime.Intrinsics.X86.Sse.IsSupported)
-                System.Runtime.Intrinsics.X86.Sse.StoreFence();
-            else
-                Thread.MemoryBarrier();
-            Volatile.Write(ref task->TaskId, 100_000 + i);
-
-            while (Volatile.Read(ref task->Status) == 0)
+            fixed (float* pA = initA, pB = initB)
             {
-                Thread.SpinWait(1);
+                CuDriver.Check(CuDriver.MemcpyHtoD(d_a, (IntPtr)pA, bufferBytes), "cuMemcpyHtoD(A)");
+                CuDriver.Check(CuDriver.MemcpyHtoD(d_b, (IntPtr)pB, bufferBytes), "cuMemcpyHtoD(B)");
             }
+
+            PersistentRingBuffer ring = GetOrCreateRingBuffer(1024);
+            ulong bufA = (ulong)d_a;
+            ulong bufB = (ulong)d_b;
+            ulong bufC = (ulong)d_c;
+
+            // 1. Genuine multi-slot Enqueue latency benchmark in burst batches of 32 slots
+            int totalEnqueues = Math.Max(64, iterations);
+            const int burstSize = 32;
+            long enqueueTicks = 0;
+            int dispatched = 0;
+            while (dispatched < totalEnqueues)
+            {
+                int batch = Math.Min(burstSize, totalEnqueues - dispatched);
+                long t0 = Stopwatch.GetTimestamp();
+                for (int b = 0; b < batch; b++)
+                {
+                    ring.Enqueue(TaskOpCode.VectorAdd, (uint)n, bufA, bufB, bufC);
+                }
+                enqueueTicks += Stopwatch.GetTimestamp() - t0;
+                dispatched += batch;
+
+                // Drain in-flight burst before next timed burst so we measure pure fire-and-forget Enqueue latency
+                ring.SubmitAndWait(TaskOpCode.Nop, 0, 0, 0, 0);
+            }
+            double dispatchUs = Stopwatch.GetElapsedTime(0, enqueueTicks).TotalMicroseconds / totalEnqueues;
+
+            // 2. Genuine synchronous round-trip turnaround wrapping across all 64 slots
+            int roundTripIters = Math.Clamp(iterations, 1, 5_000);
+            var swRoundTrip = Stopwatch.StartNew();
+            for (int i = 0; i < roundTripIters; i++)
+            {
+                ring.SubmitAndWait(TaskOpCode.VectorAdd, (uint)n, bufA, bufB, bufC);
+            }
+            swRoundTrip.Stop();
+            double roundTripUs = swRoundTrip.Elapsed.TotalMicroseconds / roundTripIters;
+
+            // 3. Verify VectorFma through PersistentRingBuffer: C = A * 2.0f + B = 10 * 2 + 20 = 40
+            ring.SubmitAndWait(TaskOpCode.VectorFma, (uint)n, bufA, bufB, bufC, scalar: 2.0f);
+
+            // Shut down persistent worker cleanly before synchronous cuMemcpyDtoH / cuMemFree
+            // (cuMemFree implicitly synchronizes all active kernels in the CUDA context).
+            ring.Dispose();
+
+            float[] result = new float[n];
+            fixed (float* pR = result)
+            {
+                CuDriver.Check(CuDriver.MemcpyDtoH((IntPtr)pR, d_c, bufferBytes), "cuMemcpyDtoH(C)");
+            }
+
+            float sampleVal = result[0];
+            bool verified = Math.Abs(sampleVal - 40.0f) < 0.001f && Math.Abs(result[n - 1] - 40.0f) < 0.001f;
+            if (n > 256)
+            {
+                verified = verified && Math.Abs(result[256] - 40.0f) < 0.001f && Math.Abs(result[n / 2] - 40.0f) < 0.001f;
+            }
+
+            return (dispatchUs, roundTripUs, verified, sampleVal);
         }
-        swRoundTrip.Stop();
-        double roundTripUs = swRoundTrip.Elapsed.TotalMicroseconds / roundTripIters;
-
-        // Verify VectorFma as well: C = A * 2.0f + B = 10 * 2 + 20 = 40
-        task->OpCode = (uint)TaskOpCode.VectorFma;
-        task->Scalar = 2.0f;
-        task->Status = 0;
-        if (System.Runtime.Intrinsics.X86.Sse.IsSupported)
-            System.Runtime.Intrinsics.X86.Sse.StoreFence();
-        else
-            Thread.MemoryBarrier();
-        Volatile.Write(ref task->TaskId, 200_001);
-
-        while (Volatile.Read(ref task->Status) == 0)
+        finally
         {
-            Thread.SpinWait(1);
+            _ringBuffer?.Dispose();
+            CuDriver.MemFree(d_a);
+            CuDriver.MemFree(d_b);
+            CuDriver.MemFree(d_c);
         }
-
-        // Shutdown worker before copying back device memory (MemcpyDtoH synchronizes stream)
-        task->OpCode = (uint)TaskOpCode.Shutdown;
-        if (System.Runtime.Intrinsics.X86.Sse.IsSupported)
-            System.Runtime.Intrinsics.X86.Sse.StoreFence();
-        else
-            Thread.MemoryBarrier();
-        Volatile.Write(ref task->TaskId, task->TaskId + 1);
-        CuDriver.CtxSynchronize();
-
-        // Verify result after worker kernel shutdown
-        float[] result = new float[N];
-        fixed (float* pR = result)
-        {
-            CuDriver.MemcpyDtoH((IntPtr)pR, d_c, bufferBytes);
-        }
-        float sampleVal = result[0];
-        bool verified = Math.Abs(sampleVal - 40.0f) < 0.001f && Math.Abs(result[N - 1] - 40.0f) < 0.001f;
-        if (N > 256)
-        {
-            verified = verified && Math.Abs(result[256] - 40.0f) < 0.001f && Math.Abs(result[N / 2] - 40.0f) < 0.001f;
-        }
-
-        // Cleanup
-        CuDriver.MemFree(d_a);
-        CuDriver.MemFree(d_b);
-        CuDriver.MemFree(d_c);
-        if (_hostTaskPtr != IntPtr.Zero)
-        {
-            CuDriver.MemFreeHost(_hostTaskPtr);
-            _hostTaskPtr = IntPtr.Zero;
-            _devTaskPtr = IntPtr.Zero;
-        }
-        _ringBuffer = null;
-
-        return (dispatchUs, roundTripUs, verified, sampleVal);
     }
 
     /// <summary>
-    /// Executes SASS FMA unrolled compute benchmark.
+    /// Executes SASS FMA unrolled compute benchmark with zero heap allocations.
     /// </summary>
     public (double tflops, double latencyMs) BenchmarkFmaCompute(int N = 4_194_304, int loopCount = 200)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         CuDriver.CtxSetCurrent(_ctx);
-        nuint bytes = (nuint)(N * sizeof(float));
+        int n = N;
+        int loops = loopCount;
+        nuint bytes = (nuint)(n * sizeof(float));
 
         CuDriver.Check(CuDriver.MemAlloc(out IntPtr d_a, bytes), "cuMemAlloc");
         CuDriver.Check(CuDriver.MemAlloc(out IntPtr d_b, bytes), "cuMemAlloc");
         CuDriver.Check(CuDriver.MemAlloc(out IntPtr d_c, bytes), "cuMemAlloc");
 
-        IntPtr[] kernelParams = new IntPtr[5];
-        GCHandle hParam0 = GCHandle.Alloc(d_a, GCHandleType.Pinned);
-        GCHandle hParam1 = GCHandle.Alloc(d_b, GCHandleType.Pinned);
-        GCHandle hParam2 = GCHandle.Alloc(d_c, GCHandleType.Pinned);
-        GCHandle hParam3 = GCHandle.Alloc(N, GCHandleType.Pinned);
-        GCHandle hParam4 = GCHandle.Alloc(loopCount, GCHandleType.Pinned);
-
-        kernelParams[0] = hParam0.AddrOfPinnedObject();
-        kernelParams[1] = hParam1.AddrOfPinnedObject();
-        kernelParams[2] = hParam2.AddrOfPinnedObject();
-        kernelParams[3] = hParam3.AddrOfPinnedObject();
-        kernelParams[4] = hParam4.AddrOfPinnedObject();
-        GCHandle hArray = GCHandle.Alloc(kernelParams, GCHandleType.Pinned);
-
-        // Warmup
-        CuDriver.LaunchKernel(_fnVectorFma, (uint)(N / 256), 1, 1, 256, 1, 1, 0, IntPtr.Zero, hArray.AddrOfPinnedObject(), IntPtr.Zero);
-        CuDriver.CtxSynchronize();
-
-        int iters = 20;
-        var sw = Stopwatch.StartNew();
-        for (int i = 0; i < iters; i++)
+        try
         {
-            CuDriver.LaunchKernel(_fnVectorFma, (uint)(N / 256), 1, 1, 256, 1, 1, 0, IntPtr.Zero, hArray.AddrOfPinnedObject(), IntPtr.Zero);
+            void** pParams = stackalloc void*[5];
+            pParams[0] = &d_a;
+            pParams[1] = &d_b;
+            pParams[2] = &d_c;
+            pParams[3] = &n;
+            pParams[4] = &loops;
+
+            uint gridX = (uint)((n + 255) / 256);
+
+            // Warmup
+            CuDriver.Check(CuDriver.LaunchKernel(_fnVectorFma, gridX, 1, 1, 256, 1, 1, 0, IntPtr.Zero, (IntPtr)pParams, IntPtr.Zero), "cuLaunchKernel(fma warmup)");
+            CuDriver.StreamSynchronize(IntPtr.Zero);
+
+            int iters = 20;
+            var sw = Stopwatch.StartNew();
+            for (int i = 0; i < iters; i++)
+            {
+                CuDriver.LaunchKernel(_fnVectorFma, gridX, 1, 1, 256, 1, 1, 0, IntPtr.Zero, (IntPtr)pParams, IntPtr.Zero);
+            }
+            CuDriver.StreamSynchronize(IntPtr.Zero);
+            sw.Stop();
+
+            double totalSecs = sw.Elapsed.TotalSeconds;
+            double avgMs = sw.Elapsed.TotalMilliseconds / iters;
+            double fmaOpsPerThread = (double)loops * 8.0 * 2.0;
+            double totalFlops = (double)n * fmaOpsPerThread * iters;
+            double tflops = (totalFlops / totalSecs) / 1e12;
+
+            return (tflops, avgMs);
         }
-        CuDriver.CtxSynchronize();
-        sw.Stop();
-
-        hParam0.Free();
-        hParam1.Free();
-        hParam2.Free();
-        hParam3.Free();
-        hParam4.Free();
-        hArray.Free();
-
-        CuDriver.MemFree(d_a);
-        CuDriver.MemFree(d_b);
-        CuDriver.MemFree(d_c);
-
-        double totalSecs = sw.Elapsed.TotalSeconds;
-        double avgMs = sw.Elapsed.TotalMilliseconds / iters;
-        double fmaOpsPerThread = (double)loopCount * 8.0 * 2.0;
-        double totalFlops = (double)N * fmaOpsPerThread * iters;
-        double tflops = (totalFlops / totalSecs) / 1e12;
-
-        return (tflops, avgMs);
+        finally
+        {
+            CuDriver.MemFree(d_a);
+            CuDriver.MemFree(d_b);
+            CuDriver.MemFree(d_c);
+        }
     }
 
     public void Synchronize()
     {
-        if (_ctx != IntPtr.Zero)
+        if (_ctx != IntPtr.Zero && !_disposed)
         {
             CuDriver.CtxSetCurrent(_ctx);
-            CuDriver.CtxSynchronize();
+            if (_ringBuffer != null && !_ringBuffer.IsDisposed)
+            {
+                CuDriver.StreamSynchronize(IntPtr.Zero);
+            }
+            else
+            {
+                CuDriver.CtxSynchronize();
+            }
         }
     }
 
@@ -399,14 +400,24 @@ public sealed unsafe class NvidiaSassEngine : IGpuEngine
         if (!_disposed)
         {
             _disposed = true;
+            _initialized = false;
             _ringBuffer?.Dispose();
             _ringBuffer = null;
 
-            if (_hWorkerParam.IsAllocated) _hWorkerParam.Free();
-            if (_hWorkerArray.IsAllocated) _hWorkerArray.Free();
-
             if (_ctx != IntPtr.Zero)
             {
+                CuDriver.CtxSetCurrent(_ctx);
+                if (_workerStream != IntPtr.Zero)
+                {
+                    CuDriver.StreamDestroy(_workerStream);
+                    _workerStream = IntPtr.Zero;
+                }
+                if (_hostTaskPtr != IntPtr.Zero)
+                {
+                    CuDriver.MemFreeHost(_hostTaskPtr);
+                    _hostTaskPtr = IntPtr.Zero;
+                    _devTaskPtr = IntPtr.Zero;
+                }
                 CuDriver.CtxDestroy(_ctx);
                 _ctx = IntPtr.Zero;
             }

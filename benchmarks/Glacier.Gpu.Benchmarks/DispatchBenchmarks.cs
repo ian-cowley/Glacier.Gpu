@@ -1,7 +1,5 @@
 using System;
-using System.Diagnostics;
 using BenchmarkDotNet.Attributes;
-using Glacier.Gpu.Common;
 using Glacier.Gpu.Drivers;
 using Glacier.Gpu.Engines;
 using Glacier.Gpu.RingBuffer;
@@ -12,7 +10,6 @@ namespace Glacier.Gpu.Benchmarks;
 public class DispatchBenchmarks : IDisposable
 {
     private NvidiaSassEngine? _engine;
-    private UnifiedMemoryBlock<GpuWorkTask>? _taskBlock;
     private PersistentRingBuffer? _ringBuffer;
     private IntPtr _d_a;
     private IntPtr _d_b;
@@ -27,8 +24,7 @@ public class DispatchBenchmarks : IDisposable
         _engine = new NvidiaSassEngine();
         _engine.Initialize();
 
-        _taskBlock = _engine.AllocateUnifiedMemory<GpuWorkTask>(1);
-        _ringBuffer = new PersistentRingBuffer(_taskBlock.HostPointer, _taskBlock.DevicePointer);
+        _ringBuffer = _engine.GetOrCreateRingBuffer();
 
         nuint bytes = (nuint)(N * sizeof(float));
         CuDriver.Check(CuDriver.MemAlloc(out _d_a, bytes), "cuMemAlloc");
@@ -52,13 +48,13 @@ public class DispatchBenchmarks : IDisposable
     [GlobalCleanup]
     public void Cleanup()
     {
-        _ringBuffer?.Shutdown();
         _ringBuffer?.Dispose();
-        _taskBlock?.Dispose();
-        if (_d_a != IntPtr.Zero) CuDriver.MemFree(_d_a);
-        if (_d_b != IntPtr.Zero) CuDriver.MemFree(_d_b);
-        if (_d_c != IntPtr.Zero) CuDriver.MemFree(_d_c);
+        _ringBuffer = null;
+        if (_d_a != IntPtr.Zero) { CuDriver.MemFree(_d_a); _d_a = IntPtr.Zero; }
+        if (_d_b != IntPtr.Zero) { CuDriver.MemFree(_d_b); _d_b = IntPtr.Zero; }
+        if (_d_c != IntPtr.Zero) { CuDriver.MemFree(_d_c); _d_c = IntPtr.Zero; }
         _engine?.Dispose();
+        _engine = null;
     }
 
     public void Dispose() => Cleanup();

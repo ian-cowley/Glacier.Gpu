@@ -5,7 +5,7 @@ using Glacier.Gpu.Drivers;
 namespace Glacier.Gpu.Engines;
 
 /// <summary>
-/// Universal Vulkan 1.3+ compute execution engine with hardware tensor (VK_KHR_cooperative_matrix) support.
+/// Universal Vulkan 1.2+ compute execution engine.
 /// Zero-dependency execution across AMD Radeon, Intel Arc, and NVIDIA GPUs on Windows and Linux.
 /// </summary>
 public sealed class VulkanEngine : IGpuEngine
@@ -28,33 +28,32 @@ public sealed class VulkanEngine : IGpuEngine
 
     public void Initialize()
     {
+        ObjectDisposedException.ThrowIf(_disposed, this);
         if (_initialized) return;
         _context = new VulkanContext(_deviceOrdinal);
 
         string devName = _context.DeviceName;
         string lower = devName.ToLowerInvariant();
-        bool isApu = lower.Contains("890m") || lower.Contains("880m") ||
-                     lower.Contains("780m") || lower.Contains("760m") ||
-                     lower.Contains("680m") || lower.Contains("660m") ||
-                     lower.Contains("graphics") || lower.Contains("apu");
+        // VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU == 1
+        bool isIntegrated = _context.PhysicalDeviceType == 1 ||
+                            lower.Contains("890m") || lower.Contains("880m") ||
+                            lower.Contains("780m") || lower.Contains("760m") ||
+                            lower.Contains("680m") || lower.Contains("660m") ||
+                            lower.Contains("apu");
 
         GpuDeviceType devType;
-        if (lower.Contains("nvidia") || lower.Contains("geforce") || lower.Contains("rtx"))
+        if (_context.VendorId == 0x10DE || lower.Contains("nvidia") || lower.Contains("geforce") || lower.Contains("rtx"))
             devType = GpuDeviceType.NvidiaDiscrete;
-        else if (isApu)
-            devType = GpuDeviceType.AmdIntegratedApu;
-        else if (lower.Contains("amd") || lower.Contains("radeon"))
-            devType = GpuDeviceType.AmdDiscrete;
-        else if (lower.Contains("intel") || lower.Contains("arc"))
-            devType = lower.Contains("arc") ? GpuDeviceType.IntelDiscrete : GpuDeviceType.IntelIntegrated;
+        else if (_context.VendorId == 0x1002 || lower.Contains("amd") || lower.Contains("radeon"))
+            devType = isIntegrated ? GpuDeviceType.AmdIntegratedApu : GpuDeviceType.AmdDiscrete;
+        else if (_context.VendorId == 0x8086 || lower.Contains("intel") || lower.Contains("arc"))
+            devType = isIntegrated ? GpuDeviceType.IntelIntegrated : GpuDeviceType.IntelDiscrete;
         else
             devType = GpuDeviceType.VulkanGeneric;
 
         string arch = devName;
-        if (lower.Contains("890m") || lower.Contains("880m"))
-            arch = "RDNA 3.5 (gfx1150)";
-        else if (lower.Contains("680m") || lower.Contains("660m"))
-            arch = "RDNA 2.0 (gfx1035)";
+        if (devType == GpuDeviceType.AmdIntegratedApu || devType == GpuDeviceType.AmdDiscrete)
+            arch = AmdRdnaEngine.ResolveArchitecture(devName, isIntegrated);
 
         _deviceInfo = new GpuDeviceInfo(
             DeviceName: devName,
@@ -62,7 +61,7 @@ public sealed class VulkanEngine : IGpuEngine
             Architecture: arch,
             ComputeUnitsOrSms: 0,
             TotalMemoryBytes: (long)_context.TotalVramBytes,
-            IsUnifiedMemory: isApu,
+            IsUnifiedMemory: isIntegrated,
             SupportsPersistentRingBuffer: false
         );
 
@@ -71,7 +70,8 @@ public sealed class VulkanEngine : IGpuEngine
 
     public void Synchronize()
     {
-        // VulkanContext manages device synchronization through fences and queues
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        _context?.Synchronize();
     }
 
     public void Dispose()

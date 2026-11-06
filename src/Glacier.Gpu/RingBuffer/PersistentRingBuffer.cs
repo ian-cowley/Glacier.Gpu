@@ -20,6 +20,7 @@ public sealed unsafe class PersistentRingBuffer : IDisposable
     private long _sequenceCounter;
     private readonly long[] _slotSequences;
     private const int CacheLineStride = 8; // 8 * sizeof(long) = 64 bytes per slot sequence (avoids false sharing)
+    private bool _isShutdown;
     private bool _disposed;
     private readonly Action? _shutdownAction;
     private readonly Action? _disposeAction;
@@ -101,33 +102,20 @@ public sealed unsafe class PersistentRingBuffer : IDisposable
                 }
             }
 
-            // Invalidate stale TaskId from previous consumer round so any concurrent consumer scan reads 0
-            Volatile.Write(ref task->TaskId, 0);
-
             task->OpCode = (uint)opCode;
             task->ElementCount = elementCount;
             task->BufferA = bufA;
             task->BufferB = bufB;
             task->BufferC = bufC;
             task->Scalar = scalar;
+            Volatile.Write(ref task->Status, 0); // Mark slot in-flight BEFORE publishing TaskId
 
             if (System.Runtime.Intrinsics.X86.Sse.IsSupported)
                 System.Runtime.Intrinsics.X86.Sse.StoreFence();
             else
                 Thread.MemoryBarrier();
 
-            Volatile.Write(ref task->TaskId, id);
-
-            if (System.Runtime.Intrinsics.X86.Sse.IsSupported)
-                System.Runtime.Intrinsics.X86.Sse.StoreFence();
-            else
-                Thread.MemoryBarrier();
-
-            // Bounded pause ensuring any consumer inspecting the slot while TaskId was being published
-            // finishes reading the prior Status (1) before we flip Status to 0.
-            Thread.SpinWait(400);
-
-            Volatile.Write(ref task->Status, 0); // Publish task as in-flight / ready for consumer
+            Volatile.Write(ref task->TaskId, id); // Release-publish monotonic sequence ID to GPU consumer
 
             // 3. Publish slot turn lease to next generation producer for this slot
             Volatile.Write(ref _slotSequences[slotIndex], seq - 1 + _capacity);
@@ -174,8 +162,9 @@ public sealed unsafe class PersistentRingBuffer : IDisposable
     /// </summary>
     public void Shutdown()
     {
-        if (_tasks != null && !_disposed)
+        if (_tasks != null && !_isShutdown)
         {
+            _isShutdown = true;
             try
             {
                 Enqueue(TaskOpCode.Shutdown, 0, 0, 0, 0, 0f, timeoutMs: 1000);
@@ -213,8 +202,8 @@ public sealed unsafe class PersistentRingBuffer : IDisposable
     {
         if (!_disposed)
         {
-            _disposed = true;
             Shutdown();
+            _disposed = true;
             if (_disposeAction != null)
             {
                 _disposeAction();

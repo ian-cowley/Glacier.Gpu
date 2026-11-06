@@ -1,6 +1,5 @@
 using System;
 using Glacier.Gpu.Common;
-using Glacier.Gpu.Drivers;
 using Glacier.Gpu.Engines;
 using Glacier.Gpu.Factory;
 
@@ -13,10 +12,18 @@ Console.WriteLine("=============================================================
 Console.ResetColor();
 
 Console.WriteLine(">>> Discovering and Initializing GPU Hardware via Direct Driver P/Invoke...");
-using var heterogeneous = GpuEngineFactory.TryCreateHeterogeneousEngine()
-    ?? throw new InvalidOperationException("Failed to initialize GPU compute engines.");
+using var heterogeneous = GpuEngineFactory.TryCreateHeterogeneousEngine();
+using var standaloneNvidia = heterogeneous == null ? GpuEngineFactory.TryCreateNvidiaEngine() : null;
+using var standaloneAmd = heterogeneous == null && HipDriverAvailable() ? new AmdRdnaEngine() : null;
+if (standaloneAmd != null)
+{
+    try { standaloneAmd.Initialize(); } catch { }
+}
 
-if (heterogeneous.Nvidia is { IsInitialized: true } nvEngine)
+NvidiaSassEngine? nvActive = heterogeneous?.Nvidia ?? standaloneNvidia;
+AmdRdnaEngine? amdActive = heterogeneous?.Amd ?? (standaloneAmd is { IsInitialized: true } ? standaloneAmd : null);
+
+if (nvActive is { IsInitialized: true } nvEngine)
 {
     var nv = nvEngine.DeviceInfo;
     Console.ForegroundColor = ConsoleColor.Green;
@@ -30,7 +37,7 @@ else
     Console.ResetColor();
 }
 
-if (heterogeneous.Amd is { IsInitialized: true } amdEngine)
+if (amdActive is { IsInitialized: true } amdEngine)
 {
     var amd = amdEngine.DeviceInfo;
     Console.ForegroundColor = ConsoleColor.Red;
@@ -40,20 +47,17 @@ if (heterogeneous.Amd is { IsInitialized: true } amdEngine)
 else
 {
     Console.ForegroundColor = ConsoleColor.DarkYellow;
-    Console.WriteLine("    [AMD APU]     Not available or driver not detected.");
+    Console.WriteLine("    [AMD APU]     Not available or HIP driver not detected.");
     Console.ResetColor();
 }
 
-// -----------------------------------------------------------------------------
-// EXPERIMENT 1: Sub-Microsecond Persistent Ring Buffer Dispatch
-// -----------------------------------------------------------------------------
 Console.WriteLine("\n--------------------------------------------------------------------------------");
 Console.ForegroundColor = ConsoleColor.Yellow;
 Console.WriteLine("EXPERIMENT 1: CPU-to-GPU Dispatch Latency (Traditional Driver vs Persistent Ring)");
 Console.ResetColor();
 Console.WriteLine("--------------------------------------------------------------------------------");
 
-if (heterogeneous.Nvidia is { IsInitialized: true } nv1)
+if (nvActive is { IsInitialized: true } nv1)
 {
     int tradIters = 50_000;
     Console.WriteLine($"Running {tradIters:N0} traditional cuLaunchKernel launches via nvcuda.dll...");
@@ -65,16 +69,16 @@ if (heterogeneous.Nvidia is { IsInitialized: true } nv1)
     var (dispatchUs, roundTripUs, verified, sampleVal) = nv1.MeasureRingBufferLatency(ringIters);
     Console.WriteLine($"  [Persistent Ring Buffer] Fire-and-Forget Enqueue: {dispatchUs:F3} \u03bcs ({1_000_000.0 / dispatchUs:N0} tasks/sec)");
     Console.WriteLine($"  [Persistent Ring Buffer] Full Round-Trip Turnaround: {roundTripUs:F3} \u03bcs ({1_000_000.0 / roundTripUs:N0} roundtrips/sec)");
-    
+
     if (verified)
     {
         Console.ForegroundColor = ConsoleColor.Green;
-        Console.WriteLine($"  [Verification] Correctness check: PASSED (Result: {sampleVal:F1}, Expected: 30.0)");
+        Console.WriteLine($"  [Verification] Correctness check: PASSED (Result: {sampleVal:F1}, Expected: 40.0)");
     }
     else
     {
         Console.ForegroundColor = ConsoleColor.Red;
-        Console.WriteLine($"  [Verification] Correctness check: FAILED (Result: {sampleVal:F1}, Expected: 30.0)");
+        Console.WriteLine($"  [Verification] Correctness check: FAILED (Result: {sampleVal:F1}, Expected: 40.0)");
     }
     Console.ResetColor();
 
@@ -88,18 +92,15 @@ else
     Console.WriteLine("NVIDIA discrete GPU not available. Skipping Experiment 1.");
 }
 
-// -----------------------------------------------------------------------------
-// EXPERIMENT 2: Raw Ada Lovelace SASS Hardware Compute (RTX 4060)
-// -----------------------------------------------------------------------------
 Console.WriteLine("\n--------------------------------------------------------------------------------");
 Console.ForegroundColor = ConsoleColor.Yellow;
-Console.WriteLine("EXPERIMENT 2: Raw Ada Lovelace SASS Hardware Compute (RTX 4060 Laptop GPU)");
+Console.WriteLine("EXPERIMENT 2: Raw SASS Hardware Compute");
 Console.ResetColor();
 Console.WriteLine("--------------------------------------------------------------------------------");
 
-if (heterogeneous.Nvidia is { IsInitialized: true } nv2)
+if (nvActive is { IsInitialized: true } nv2)
 {
-    Console.WriteLine("Executing raw SASS machine code kernel (unrolled FMA loops across 24 SMs)...");
+    Console.WriteLine("Executing raw SASS machine code kernel (unrolled FMA loops)...");
     var (tflops, avgMs) = nv2.BenchmarkFmaCompute(N: 4_194_304, loopCount: 250);
     Console.WriteLine($"  Average Execution Latency:       {avgMs:F2} ms");
     Console.ForegroundColor = ConsoleColor.Cyan;
@@ -111,29 +112,18 @@ else
     Console.WriteLine("NVIDIA discrete GPU not available. Skipping Experiment 2.");
 }
 
-// -----------------------------------------------------------------------------
-// EXPERIMENT 3: AMD Radeon 890M Zero-Copy Unified Memory (RDNA 3.5 APU)
-// -----------------------------------------------------------------------------
 Console.WriteLine("\n--------------------------------------------------------------------------------");
 Console.ForegroundColor = ConsoleColor.Yellow;
-Console.WriteLine("EXPERIMENT 3: AMD Radeon 890M Zero-Copy Unified Memory (RDNA 3.5 APU)");
+Console.WriteLine("EXPERIMENT 3: AMD Radeon Zero-Copy Unified Memory");
 Console.ResetColor();
 Console.WriteLine("--------------------------------------------------------------------------------");
 
-if (heterogeneous.Amd is { IsInitialized: true } amd3)
+if (amdActive is { IsInitialized: true } amd3)
 {
     Console.WriteLine("Testing true zero-copy direct memory access from C#...");
     var (accessUs, accVerified) = amd3.TestZeroCopyDirectAccess();
-    if (accVerified)
-    {
-        Console.ForegroundColor = ConsoleColor.Green;
-        Console.WriteLine("  Zero-Copy Verification: PASSED (Coherency confirmed)");
-    }
-    else
-    {
-        Console.ForegroundColor = ConsoleColor.Red;
-        Console.WriteLine("  Zero-Copy Verification: FAILED");
-    }
+    Console.ForegroundColor = accVerified ? ConsoleColor.Green : ConsoleColor.Red;
+    Console.WriteLine($"  Zero-Copy Verification: {(accVerified ? "PASSED" : "FAILED")}");
     Console.ResetColor();
     Console.WriteLine($"  C#-to-GPU Memory Sharing Latency: {accessUs:F3} \u03bcs (Zero PCIe staging copy!)");
 
@@ -146,23 +136,20 @@ if (heterogeneous.Amd is { IsInitialized: true } amd3)
 }
 else
 {
-    Console.WriteLine("AMD APU not available. Skipping Experiment 3.");
+    Console.WriteLine("AMD HIP APU not available. Skipping Experiment 3.");
 }
 
-// -----------------------------------------------------------------------------
-// EXPERIMENT 4: Heterogeneous Dual-GPU Concurrent Orchestration
-// -----------------------------------------------------------------------------
 Console.WriteLine("\n--------------------------------------------------------------------------------");
 Console.ForegroundColor = ConsoleColor.Yellow;
 Console.WriteLine("EXPERIMENT 4: Heterogeneous Dual-GPU Concurrent Execution");
 Console.ResetColor();
 Console.WriteLine("--------------------------------------------------------------------------------");
 
-if (heterogeneous.Nvidia is { IsInitialized: true } && heterogeneous.Amd is { IsInitialized: true })
+if (heterogeneous is { IsInitialized: true })
 {
     Console.WriteLine(">>> Firing Concurrent Dual-GPU Workloads (NVIDIA SASS FMA + AMD Zero-Copy Sweep)...");
     var (nvTflops, amdBw, totalMs) = heterogeneous.RunConcurrentWorkload(nvElements: 2_097_152, amdSizeMb: 128);
-    
+
     Console.ForegroundColor = ConsoleColor.Green;
     Console.WriteLine($"    Concurrent Dual-GPU Test Completed in {totalMs:F2} ms!");
     Console.ResetColor();
@@ -171,68 +158,7 @@ if (heterogeneous.Nvidia is { IsInitialized: true } && heterogeneous.Amd is { Is
 }
 else
 {
-    Console.WriteLine("Requires both NVIDIA and AMD GPUs for heterogeneous concurrent execution.");
-}
-
-// -----------------------------------------------------------------------------
-// EXPERIMENT 5: Architectural Wavefront & FP8 Hardware Evaluation (DLSS 5 / RDNA Findings)
-// -----------------------------------------------------------------------------
-Console.WriteLine("\n--------------------------------------------------------------------------------");
-Console.ForegroundColor = ConsoleColor.Yellow;
-Console.WriteLine("EXPERIMENT 5: Hardware Wavefront (Wave32) & FP8 Tensor Evaluation (DLSS 5 / AMDNR)");
-Console.ResetColor();
-Console.WriteLine("--------------------------------------------------------------------------------");
-
-if (OperatingSystem.IsWindows())
-{
-    using var factory = Vortice.DXGI.DXGI.CreateDXGIFactory1<Vortice.DXGI.IDXGIFactory4>();
-    for (uint i = 0; factory.EnumAdapters1(i, out Vortice.DXGI.IDXGIAdapter1 adapter).Success; i++)
-    {
-        var desc = adapter.Description1;
-        if ((desc.Flags & Vortice.DXGI.AdapterFlags.Software) != 0)
-        {
-            adapter.Dispose();
-            continue;
-        }
-
-        var hr = Vortice.Direct3D12.D3D12.D3D12CreateDevice(adapter, Vortice.Direct3D.FeatureLevel.Level_11_0, out Vortice.Direct3D12.ID3D12Device? dev);
-        if (hr.Success && dev != null)
-        {
-            var opt1 = dev.CheckFeatureSupport<Vortice.Direct3D12.FeatureDataD3D12Options1>(Vortice.Direct3D12.Feature.Options1);
-            bool isAmd = desc.Description.Contains("Radeon", StringComparison.OrdinalIgnoreCase);
-            bool isNv = desc.Description.Contains("NVIDIA", StringComparison.OrdinalIgnoreCase);
-
-            Console.ForegroundColor = isAmd ? ConsoleColor.Red : (isNv ? ConsoleColor.Green : ConsoleColor.White);
-            Console.WriteLine($"\n>>> Evaluating Adapter [{desc.Description}]:");
-            Console.ResetColor();
-            Console.WriteLine($"    DirectX 12 Wave Lane Range: {opt1.WaveLaneCountMin} - {opt1.WaveLaneCountMax} lanes");
-            Console.WriteLine($"    Total SIMD Lanes:           {opt1.TotalLaneCount:N0}");
-            Console.WriteLine($"    Wave Intrinsics Supported:  {opt1.WaveOps}");
-
-            if (isAmd)
-            {
-                Console.ForegroundColor = ConsoleColor.Cyan;
-                Console.WriteLine("    [RDNA Optimization Analysis]:");
-                Console.WriteLine($"    - Native SIMD Mode: Wave{opt1.WaveLaneCountMin} (Dual-issue capable on RDNA 3.5/4.0)");
-                Console.WriteLine($"    - Zero-Stall Wavefront Size: {opt1.WaveLaneCountMin} threads (Avoids Wave64 ALU idling)");
-                Console.WriteLine($"    - LDS Bank Layout: 32 Banks x 4 Bytes (Zero bank conflicts with 32-lane stride)");
-                Console.ResetColor();
-            }
-
-            if (isNv)
-            {
-                Console.ForegroundColor = ConsoleColor.Magenta;
-                Console.WriteLine("    [Ada Lovelace sm_89 FP8 Analysis]:");
-                Console.WriteLine("    - Native Tensor Cores: 4th Generation FP8 (e4m3 / e5m2)");
-                Console.WriteLine("    - 4096-Token KV Cache Footprint: 2.10 GB (FP32) -> 1.05 GB (FP16) -> 0.52 GB (FP8)");
-                Console.WriteLine("    - VRAM Bandwidth Reduction: 75% savings vs FP32, 50% savings vs FP16");
-                Console.ResetColor();
-            }
-
-            dev.Dispose();
-        }
-        adapter.Dispose();
-    }
+    Console.WriteLine("Requires both NVIDIA CUDA and AMD HIP GPUs for heterogeneous concurrent execution.");
 }
 
 Console.WriteLine("\n================================================================================");
@@ -240,3 +166,5 @@ Console.ForegroundColor = ConsoleColor.Green;
 Console.WriteLine("All bare-metal Glacier.Gpu experiments completed successfully!");
 Console.ResetColor();
 Console.WriteLine("================================================================================");
+
+static bool HipDriverAvailable() => Glacier.Gpu.Drivers.HipDriver.IsAvailable();

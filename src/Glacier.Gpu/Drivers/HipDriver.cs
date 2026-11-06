@@ -5,10 +5,10 @@ using System.Text;
 namespace Glacier.Gpu.Drivers;
 
 /// <summary>
-/// Direct P/Invoke bindings for the AMD HIP Driver API (amdhip64.dll).
-/// Native Windows ROCm / HIP user-mode driver for Radeon GPUs and APUs.
+/// Direct P/Invoke bindings for the AMD HIP Driver API (amdhip64.dll / libamdhip64.so).
+/// Native ROCm / HIP user-mode driver for Radeon GPUs and APUs with blittable Native AOT signatures.
 /// </summary>
-public static class HipDriver
+public static unsafe class HipDriver
 {
     private const string HipLib = "amdhip64.dll";
 
@@ -68,7 +68,17 @@ public static class HipDriver
     public static extern int GetDeviceCount(out int count);
 
     [DllImport(HipLib, EntryPoint = "hipDeviceGetName")]
-    public static extern int DeviceGetName(byte[] name, int len, int dev);
+    public static extern int DeviceGetName(byte* name, int len, int dev);
+
+    public static int DeviceGetName(byte[] name, int len, int dev)
+    {
+        ArgumentNullException.ThrowIfNull(name);
+        int safeLen = Math.Min(len, name.Length);
+        fixed (byte* pName = name)
+        {
+            return DeviceGetName(pName, safeLen, dev);
+        }
+    }
 
     [DllImport(HipLib, EntryPoint = "hipSetDevice")]
     public static extern int SetDevice(int device);
@@ -115,9 +125,12 @@ public static class HipDriver
 
     public static string GetDeviceName(int device)
     {
-        var buf = new byte[256];
-        DeviceGetName(buf, buf.Length, device);
-        return Encoding.ASCII.GetString(buf).TrimEnd('\0');
+        byte* buf = stackalloc byte[256];
+        NativeMemory.Clear(buf, 256);
+        DeviceGetName(buf, 256, device);
+        int len = 0;
+        while (len < 256 && buf[len] != 0) len++;
+        return Encoding.ASCII.GetString(buf, len);
     }
 
     public static int GetMultiprocessorCount(int device)
@@ -129,7 +142,6 @@ public static class HipDriver
         }
         catch { }
 
-        // Fallback based on known device name
         string name = GetDeviceName(device).ToLowerInvariant();
         if (name.Contains("890m")) return 16;
         if (name.Contains("880m") || name.Contains("780m") || name.Contains("680m")) return 12;
@@ -141,7 +153,7 @@ public static class HipDriver
         if (name.Contains("7700")) return 54;
         if (name.Contains("7600")) return 32;
         if (name.Contains("6900") || name.Contains("6800")) return 72;
-        return 12;
+        return 0;
     }
 
     public static nuint GetTotalMemory(int device)
@@ -152,7 +164,7 @@ public static class HipDriver
                 return mem;
         }
         catch { }
-        return unchecked((nuint)(12L * 1024 * 1024 * 1024)); // Default 12 GB
+        return 0;
     }
 
     public static void Check(int res, string op)

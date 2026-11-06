@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
-using System.Runtime.InteropServices;
+using System.Runtime.CompilerServices;
+using System.Runtime.Versioning;
 using System.Threading;
 using Glacier.Gpu.Common;
 using Glacier.Gpu.RingBuffer;
@@ -13,8 +14,8 @@ namespace Glacier.Gpu.Engines;
 
 /// <summary>
 /// Hardware compute execution engine driven directly via bare-metal Direct3D 12 Compute (d3d12.dll).
-/// Native execution on AMD Radeon 680M/780M/890M APUs and RDNA dGPUs with zero external C++ runtimes.
-/// Operates on unified system memory with zero PCIe copy overhead.
+/// Native execution on AMD Radeon 680M/780M/890M APUs, Intel Arc/Xe, and RDNA/NVIDIA dGPUs on Windows.
+/// Isolates all Windows DXGI/D3D12 calls behind NoInlining boundaries for safe cross-platform assembly loading.
 /// </summary>
 public sealed unsafe class D3D12ComputeEngine : IGpuEngine
 {
@@ -29,11 +30,9 @@ public sealed unsafe class D3D12ComputeEngine : IGpuEngine
     private ulong _fenceValue;
     private AutoResetEvent? _fenceEvent;
 
-    private UnifiedMemoryBlock<GpuWorkTask>? _ringTaskBlock;
-    private PersistentRingBuffer? _ringBuffer;
-    private ID3D12RootSignature? _ringRootSig;
-    private ID3D12PipelineState? _ringPsoVecAdd;
-    private ID3D12PipelineState? _ringPsoVecFma;
+    private ID3D12RootSignature? _computeRootSig;
+    private ID3D12PipelineState? _psoVecAdd;
+    private ID3D12PipelineState? _psoVecFma;
 
     private GpuDeviceInfo? _deviceInfo;
     private bool _initialized;
@@ -41,7 +40,11 @@ public sealed unsafe class D3D12ComputeEngine : IGpuEngine
 
     public GpuDeviceInfo DeviceInfo => _deviceInfo ?? throw new InvalidOperationException("Engine not initialized.");
     public bool IsInitialized => _initialized && !_disposed;
+
+    [SupportedOSPlatform("windows")]
     public ID3D12Device Device => _device ?? throw new InvalidOperationException("Device not created.");
+
+    [SupportedOSPlatform("windows")]
     public ID3D12CommandQueue Queue => _queue ?? throw new InvalidOperationException("Queue not created.");
 
     public D3D12ComputeEngine(int adapterIndex = -1)
@@ -51,14 +54,22 @@ public sealed unsafe class D3D12ComputeEngine : IGpuEngine
 
     public void Initialize()
     {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_initialized) return;
+
         if (!OperatingSystem.IsWindows())
             throw new PlatformNotSupportedException("Direct3D 12 Compute is only supported on Windows.");
 
+        InitializeWindows();
+    }
+
+    [SupportedOSPlatform("windows")]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void InitializeWindows()
+    {
         _factory = DXGI.CreateDXGIFactory1<IDXGIFactory4>();
 
-        // Enumerate adapters to select target GPU
         IDXGIAdapter1? chosenAdapter = null;
-        int chosenIdx = -1;
 
         for (uint i = 0; _factory.EnumAdapters1(i, out IDXGIAdapter1 a).Success; i++)
         {
@@ -74,25 +85,22 @@ public sealed unsafe class D3D12ComputeEngine : IGpuEngine
                 if ((int)i == _adapterIndex)
                 {
                     chosenAdapter = a;
-                    chosenIdx = (int)i;
                     break;
                 }
                 a.Dispose();
                 continue;
             }
 
-            // Default selection: Prefer AMD Radeon GPU, otherwise first hardware GPU
             if (desc.Description.Contains("Radeon", StringComparison.OrdinalIgnoreCase))
             {
+                chosenAdapter?.Dispose();
                 chosenAdapter = a;
-                chosenIdx = (int)i;
                 break;
             }
 
             if (chosenAdapter == null)
             {
                 chosenAdapter = a;
-                chosenIdx = (int)i;
             }
             else
             {
@@ -101,43 +109,41 @@ public sealed unsafe class D3D12ComputeEngine : IGpuEngine
         }
 
         if (chosenAdapter == null)
-            throw new InvalidOperationException("No hardware DirectX 12 compute adapters found on this system.");
+        {
+            _factory.Dispose();
+            _factory = null;
+            throw new PlatformNotSupportedException("No hardware DirectX 12 compute adapters found on this system.");
+        }
 
         _adapter = chosenAdapter;
         var adapterDesc = _adapter.Description1;
         string devName = adapterDesc.Description;
 
-        // Create D3D12 Device
         var hr = D3D12.D3D12CreateDevice(_adapter, FeatureLevel.Level_11_0, out _device);
         if (!hr.Success || _device == null)
             throw new InvalidOperationException($"Failed to create Direct3D 12 device for '{devName}': {hr}");
 
-        // Create Compute Command Queue
         var queueDesc = new CommandQueueDescription(CommandListType.Compute);
         _queue = _device.CreateCommandQueue(queueDesc);
 
-        // Create Command Allocator & List
         _cmdAlloc = _device.CreateCommandAllocator(CommandListType.Compute);
         _cmdList = _device.CreateCommandList<ID3D12GraphicsCommandList>(0, CommandListType.Compute, _cmdAlloc);
         _cmdList.Close();
 
-        // Create Fence for CPU-GPU synchronization
         _fence = _device.CreateFence(0);
         _fenceValue = 0;
         _fenceEvent = new AutoResetEvent(false);
 
-        // Determine GPU architecture classification
         string lowerName = devName.ToLowerInvariant();
         bool isApu = lowerName.Contains("890m") || lowerName.Contains("880m") ||
                      lowerName.Contains("780m") || lowerName.Contains("760m") ||
                      lowerName.Contains("680m") || lowerName.Contains("660m") ||
-                     lowerName.Contains("graphics") || lowerName.Contains("apu");
+                     lowerName.Contains("graphics") || lowerName.Contains("apu") ||
+                     ((ulong)adapterDesc.DedicatedVideoMemory == 0 && (ulong)adapterDesc.SharedSystemMemory > 0);
 
-        string arch;
-        if (lowerName.Contains("radeon"))
-            arch = AmdRdnaEngine.ResolveArchitecture(devName, isApu);
-        else
-            arch = "DirectX 12 Compute";
+        string arch = lowerName.Contains("radeon")
+            ? AmdRdnaEngine.ResolveArchitecture(devName, isApu)
+            : "DirectX 12 Compute";
 
         long totalMem = (long)(ulong)adapterDesc.DedicatedVideoMemory;
         if (totalMem == 0 || isApu)
@@ -145,14 +151,25 @@ public sealed unsafe class D3D12ComputeEngine : IGpuEngine
             totalMem = (long)(ulong)adapterDesc.SharedSystemMemory;
         }
 
+        GpuDeviceType devType;
+        if (adapterDesc.VendorId == 0x1002 || lowerName.Contains("radeon"))
+            devType = isApu ? GpuDeviceType.AmdIntegratedApu : GpuDeviceType.AmdDiscrete;
+        else if (adapterDesc.VendorId == 0x8086)
+            devType = isApu ? GpuDeviceType.IntelIntegrated : GpuDeviceType.IntelDiscrete;
+        else if (adapterDesc.VendorId == 0x10DE)
+            devType = GpuDeviceType.NvidiaDiscrete;
+        else
+            devType = GpuDeviceType.DirectMlGeneric;
+
+        // Direct3D 12 dispatches via WDDM command lists rather than persistent GPU host-polling megakernels.
         _deviceInfo = new GpuDeviceInfo(
             DeviceName: devName,
-            DeviceType: isApu ? GpuDeviceType.AmdIntegratedApu : (lowerName.Contains("radeon") ? GpuDeviceType.AmdDiscrete : GpuDeviceType.DirectMlGeneric),
+            DeviceType: devType,
             Architecture: arch,
-            ComputeUnitsOrSms: isApu ? 12 : 0,
+            ComputeUnitsOrSms: 0,
             TotalMemoryBytes: totalMem,
             IsUnifiedMemory: isApu,
-            SupportsPersistentRingBuffer: true
+            SupportsPersistentRingBuffer: false
         );
 
         _initialized = true;
@@ -160,11 +177,19 @@ public sealed unsafe class D3D12ComputeEngine : IGpuEngine
 
     /// <summary>
     /// Allocates contiguous zero-copy host-accessible GPU buffer mapped directly into CPU and GPU address spaces.
-    /// 0 ns PCIe copy penalty on unified memory architectures (UMA).
     /// </summary>
     public UnifiedMemoryBlock<T> AllocateZeroCopy<T>(int count) where T : unmanaged
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        if (!OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("Direct3D 12 Compute is only supported on Windows.");
+        return AllocateZeroCopyWindows<T>(count);
+    }
+
+    [SupportedOSPlatform("windows")]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private UnifiedMemoryBlock<T> AllocateZeroCopyWindows<T>(int count) where T : unmanaged
+    {
         if (_device == null) throw new InvalidOperationException("Device not initialized.");
 
         int byteSize = count * sizeof(T);
@@ -193,6 +218,8 @@ public sealed unsafe class D3D12ComputeEngine : IGpuEngine
     /// <summary>
     /// Allocates GPU-only device buffer in high-speed local memory / GPU cache.
     /// </summary>
+    [SupportedOSPlatform("windows")]
+    [MethodImpl(MethodImplOptions.NoInlining)]
     public ID3D12Resource AllocateDeviceBuffer(ulong byteSize, ResourceFlags flags = ResourceFlags.AllowUnorderedAccess)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -208,35 +235,23 @@ public sealed unsafe class D3D12ComputeEngine : IGpuEngine
             ResourceStates.Common);
     }
 
+    /// <summary>
+    /// Direct3D 12 uses WDDM command-list submission and does not host persistent GPU polling megakernels.
+    /// Always throws <see cref="NotSupportedException"/>; check <c>DeviceInfo.SupportsPersistentRingBuffer</c> first.
+    /// </summary>
     public PersistentRingBuffer GetOrCreateRingBuffer(int threadCount = 1024)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        if (_device == null) throw new InvalidOperationException("Device not initialized.");
-
-        if (_ringBuffer != null)
-            return _ringBuffer;
-
-        _ringTaskBlock = AllocateZeroCopy<GpuWorkTask>(64);
-
-        InitRingPipelines();
-
-        _ringBuffer = new PersistentRingBuffer(
-            _ringTaskBlock.HostPointer,
-            _ringTaskBlock.DevicePointer,
-            capacity: 64,
-            shutdownAction: () => Synchronize(),
-            disposeAction: () =>
-            {
-                _ringTaskBlock?.Dispose();
-                _ringTaskBlock = null;
-            });
-
-        return _ringBuffer;
+        throw new NotSupportedException(
+            "Direct3D 12 Compute uses WDDM command-queue submission and does not support persistent GPU host-polling ring buffer workers. " +
+            "Use NvidiaSassEngine for persistent ring buffer execution, or MeasureCommandListDispatchLatency for D3D12 command-list benchmarks.");
     }
 
-    private void InitRingPipelines()
+    [SupportedOSPlatform("windows")]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void EnsureComputePipelinesWindows()
     {
-        if (_ringRootSig != null) return;
+        if (_computeRootSig != null) return;
 
         var rootParams = new RootParameter[]
         {
@@ -247,9 +262,9 @@ public sealed unsafe class D3D12ComputeEngine : IGpuEngine
         };
 
         var rootSigDesc = new RootSignatureDescription(RootSignatureFlags.None, rootParams);
-        _ringRootSig = _device!.CreateRootSignature(rootSigDesc, RootSignatureVersion.Version1);
+        _computeRootSig = _device!.CreateRootSignature(rootSigDesc, RootSignatureVersion.Version1);
 
-        string hlslVecAdd = @"
+        const string hlslVecAdd = @"
             cbuffer Params : register(b0)
             {
                 uint count;
@@ -269,7 +284,7 @@ public sealed unsafe class D3D12ComputeEngine : IGpuEngine
             }
         ";
 
-        string hlslVecFma = @"
+        const string hlslVecFma = @"
             cbuffer Params : register(b0)
             {
                 uint count;
@@ -289,42 +304,58 @@ public sealed unsafe class D3D12ComputeEngine : IGpuEngine
             }
         ";
 
-        var blobVecAdd = Compiler.Compile(hlslVecAdd, "main", "ring_vec_add.hlsl", "cs_5_0");
-        _ringPsoVecAdd = _device.CreateComputePipelineState(new ComputePipelineStateDescription
+        var blobVecAdd = Compiler.Compile(hlslVecAdd, "main", "d3d12_vec_add.hlsl", "cs_5_0");
+        _psoVecAdd = _device.CreateComputePipelineState(new ComputePipelineStateDescription
         {
-            RootSignature = _ringRootSig,
+            RootSignature = _computeRootSig,
             ComputeShader = blobVecAdd
         });
 
-        var blobVecFma = Compiler.Compile(hlslVecFma, "main", "ring_vec_fma.hlsl", "cs_5_0");
-        _ringPsoVecFma = _device.CreateComputePipelineState(new ComputePipelineStateDescription
+        var blobVecFma = Compiler.Compile(hlslVecFma, "main", "d3d12_vec_fma.hlsl", "cs_5_0");
+        _psoVecFma = _device.CreateComputePipelineState(new ComputePipelineStateDescription
         {
-            RootSignature = _ringRootSig,
+            RootSignature = _computeRootSig,
             ComputeShader = blobVecFma
         });
     }
 
     /// <summary>
-    /// Measures CPU-to-GPU fire-and-forget enqueue latency vs round-trip synchronous latency across arbitrary vector sizes.
-    /// Operates on Direct3D 12 default heaps with zero PCIe transfer penalties.
+    /// Measures honest Direct3D 12 command-list recording + ExecuteCommandList submission latency and fence-synchronized GPU turnaround.
     /// </summary>
-    public (double dispatchUs, double roundTripUs, bool verified, float sampleVal) MeasureRingBufferLatency(int iterations = 10_000, int elementCount = 256)
+    public (double dispatchUs, double roundTripUs, bool verified, float sampleVal) MeasureCommandListDispatchLatency(int iterations = 1_000, int elementCount = 256)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        if (!OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("Direct3D 12 Compute is only supported on Windows.");
+        return MeasureCommandListDispatchLatencyWindows(iterations, elementCount);
+    }
+
+    /// <summary>
+    /// Retained for benchmark signature compatibility; delegates to <see cref="MeasureCommandListDispatchLatency"/>.
+    /// Note that Direct3D 12 executes WDDM command lists rather than persistent GPU polling workers.
+    /// </summary>
+    [Obsolete("D3D12 executes WDDM command lists rather than a persistent GPU ring worker. Use MeasureCommandListDispatchLatency instead.")]
+    public (double dispatchUs, double roundTripUs, bool verified, float sampleVal) MeasureRingBufferLatency(int iterations = 1_000, int elementCount = 256)
+        => MeasureCommandListDispatchLatency(iterations, elementCount);
+
+    [SupportedOSPlatform("windows")]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private (double dispatchUs, double roundTripUs, bool verified, float sampleVal) MeasureCommandListDispatchLatencyWindows(int iterations, int elementCount)
+    {
         if (_device == null || _queue == null || _cmdList == null || _cmdAlloc == null)
             throw new InvalidOperationException("Device not initialized.");
 
-        int N = elementCount;
-        ulong bufferBytes = (ulong)(N * sizeof(float));
+        EnsureComputePipelinesWindows();
 
-        // Allocate device buffers in device-resident default heap (D3D12_HEAP_TYPE_DEFAULT)
+        int n = Math.Max(1, elementCount);
+        ulong bufferBytes = (ulong)(n * sizeof(float));
+
         using var d_a = AllocateDeviceBuffer(bufferBytes);
         using var d_b = AllocateDeviceBuffer(bufferBytes);
         using var d_c = AllocateDeviceBuffer(bufferBytes);
 
-        // Upload initial data (A = 10.0f, B = 20.0f)
-        float[] initA = new float[N];
-        float[] initB = new float[N];
+        float[] initA = new float[n];
+        float[] initB = new float[n];
         Array.Fill(initA, 10.0f);
         Array.Fill(initB, 20.0f);
 
@@ -353,77 +384,42 @@ public sealed unsafe class D3D12ComputeEngine : IGpuEngine
         _cmdList.CopyResource(d_b, upB);
         _cmdList.Close();
         _queue.ExecuteCommandList(_cmdList);
-        Synchronize();
+        SynchronizeWindows();
 
-        PersistentRingBuffer ring = GetOrCreateRingBuffer(1024);
-        GpuWorkTask* task = (GpuWorkTask*)ring.HostTaskPointer;
-        task->ElementCount = (uint)N;
-        task->BufferA = d_a.GPUVirtualAddress;
-        task->BufferB = d_b.GPUVirtualAddress;
-        task->BufferC = d_c.GPUVirtualAddress;
-
-        // 1. Enqueue latency benchmark (CPU writing tasks to ring buffer)
-        var swEnqueue = Stopwatch.StartNew();
-        for (uint i = 1; i <= (uint)iterations; i++)
-        {
-            task->OpCode = (uint)TaskOpCode.VectorAdd;
-            if (System.Runtime.Intrinsics.X86.Sse.IsSupported)
-                System.Runtime.Intrinsics.X86.Sse.StoreFence();
-            else
-                Thread.MemoryBarrier();
-            Volatile.Write(ref task->TaskId, i);
-        }
-        swEnqueue.Stop();
-        double dispatchUs = swEnqueue.Elapsed.TotalMicroseconds / iterations;
-
-        // 2. Synchronous round-trip turnaround
-        int roundTripIters = Math.Min(1000, iterations);
-        uint dispatchGroups = (uint)((N + 63) / 64);
+        int roundTripIters = Math.Clamp(iterations, 1, 1_000);
+        uint dispatchGroups = (uint)((n + 63) / 64);
         uint* pConstsAdd = stackalloc uint[2];
-        pConstsAdd[0] = (uint)N;
+        pConstsAdd[0] = (uint)n;
         float zero = 0.0f;
         pConstsAdd[1] = *(uint*)&zero;
 
+        long submitTicks = 0;
         var swRoundTrip = Stopwatch.StartNew();
-        for (uint i = 1; i <= (uint)roundTripIters; i++)
+        for (int i = 0; i < roundTripIters; i++)
         {
-            task->OpCode = (uint)TaskOpCode.VectorAdd;
-            task->Status = 0;
-            if (System.Runtime.Intrinsics.X86.Sse.IsSupported)
-                System.Runtime.Intrinsics.X86.Sse.StoreFence();
-            else
-                Thread.MemoryBarrier();
-            Volatile.Write(ref task->TaskId, 100_000 + i);
-
+            long t0 = Stopwatch.GetTimestamp();
             _cmdAlloc.Reset();
-            _cmdList.Reset(_cmdAlloc, _ringPsoVecAdd);
-            _cmdList.SetComputeRootSignature(_ringRootSig!);
+            _cmdList.Reset(_cmdAlloc, _psoVecAdd);
+            _cmdList.SetComputeRootSignature(_computeRootSig!);
             _cmdList.SetComputeRoot32BitConstants(0, 2, (IntPtr)pConstsAdd, 0);
             _cmdList.SetComputeRootUnorderedAccessView(1, d_a.GPUVirtualAddress);
             _cmdList.SetComputeRootUnorderedAccessView(2, d_b.GPUVirtualAddress);
             _cmdList.SetComputeRootUnorderedAccessView(3, d_c.GPUVirtualAddress);
             _cmdList.Dispatch(dispatchGroups, 1, 1);
             _cmdList.Close();
-
             _queue.ExecuteCommandList(_cmdList);
-            Synchronize();
-            task->Status = 1;
+            submitTicks += Stopwatch.GetTimestamp() - t0;
+
+            SynchronizeWindows();
         }
         swRoundTrip.Stop();
+
+        double dispatchUs = Stopwatch.GetElapsedTime(0, submitTicks).TotalMicroseconds / roundTripIters;
         double roundTripUs = swRoundTrip.Elapsed.TotalMicroseconds / roundTripIters;
 
-        // 3. Verify VectorFma: C = A * 2.0f + B = 10 * 2 + 20 = 40
-        task->OpCode = (uint)TaskOpCode.VectorFma;
-        task->Scalar = 2.0f;
-        task->Status = 0;
-        if (System.Runtime.Intrinsics.X86.Sse.IsSupported)
-            System.Runtime.Intrinsics.X86.Sse.StoreFence();
-        else
-            Thread.MemoryBarrier();
-        Volatile.Write(ref task->TaskId, 200_000);
-
+        // Verify VectorFma on GPU: C = A * 2.0f + B = 10 * 2 + 20 = 40
         uint* pConstsFma = stackalloc uint[2];
-        pConstsFma[0] = (uint)N;
+        pConstsFma[0] = (uint)n;
         float fmaScalar = 2.0f;
         pConstsFma[1] = *(uint*)&fmaScalar;
 
@@ -432,8 +428,8 @@ public sealed unsafe class D3D12ComputeEngine : IGpuEngine
             ResourceDescription.Buffer(bufferBytes), ResourceStates.CopyDest);
 
         _cmdAlloc.Reset();
-        _cmdList.Reset(_cmdAlloc, _ringPsoVecFma);
-        _cmdList.SetComputeRootSignature(_ringRootSig!);
+        _cmdList.Reset(_cmdAlloc, _psoVecFma);
+        _cmdList.SetComputeRootSignature(_computeRootSig!);
         _cmdList.SetComputeRoot32BitConstants(0, 2, (IntPtr)pConstsFma, 0);
         _cmdList.SetComputeRootUnorderedAccessView(1, d_a.GPUVirtualAddress);
         _cmdList.SetComputeRootUnorderedAccessView(2, d_b.GPUVirtualAddress);
@@ -446,14 +442,13 @@ public sealed unsafe class D3D12ComputeEngine : IGpuEngine
         _cmdList.Close();
 
         _queue.ExecuteCommandList(_cmdList);
-        Synchronize();
-        task->Status = 1;
+        SynchronizeWindows();
 
         void* pRead = null;
         readback.Map(0, null, &pRead);
         float* pOut = (float*)pRead;
         float sampleVal = pOut[0];
-        bool verified = Math.Abs(sampleVal - 40.0f) < 1e-3f;
+        bool verified = Math.Abs(sampleVal - 40.0f) < 1e-3f && Math.Abs(pOut[n - 1] - 40.0f) < 1e-3f;
         readback.Unmap(0);
 
         return (dispatchUs, roundTripUs, verified, sampleVal);
@@ -461,7 +456,15 @@ public sealed unsafe class D3D12ComputeEngine : IGpuEngine
 
     public void Synchronize()
     {
-        if (_queue == null || _fence == null || _fenceEvent == null || _disposed) return;
+        if (!OperatingSystem.IsWindows() || _disposed) return;
+        SynchronizeWindows();
+    }
+
+    [SupportedOSPlatform("windows")]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void SynchronizeWindows()
+    {
+        if (_queue == null || _fence == null || _fenceEvent == null) return;
 
         _fenceValue++;
         _queue.Signal(_fence, _fenceValue);
@@ -479,23 +482,30 @@ public sealed unsafe class D3D12ComputeEngine : IGpuEngine
         {
             _disposed = true;
             _initialized = false;
-
-            Synchronize();
-
-            _ringBuffer?.Dispose();
-            _ringPsoVecAdd?.Dispose();
-            _ringPsoVecFma?.Dispose();
-            _ringRootSig?.Dispose();
-            _ringTaskBlock?.Dispose();
-
-            _fenceEvent?.Dispose();
-            _fence?.Dispose();
-            _cmdList?.Dispose();
-            _cmdAlloc?.Dispose();
-            _queue?.Dispose();
-            _device?.Dispose();
-            _adapter?.Dispose();
-            _factory?.Dispose();
+            if (OperatingSystem.IsWindows())
+            {
+                DisposeWindows();
+            }
         }
+    }
+
+    [SupportedOSPlatform("windows")]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void DisposeWindows()
+    {
+        try { SynchronizeWindows(); } catch { }
+
+        _psoVecAdd?.Dispose();
+        _psoVecFma?.Dispose();
+        _computeRootSig?.Dispose();
+
+        _fenceEvent?.Dispose();
+        _fence?.Dispose();
+        _cmdList?.Dispose();
+        _cmdAlloc?.Dispose();
+        _queue?.Dispose();
+        _device?.Dispose();
+        _adapter?.Dispose();
+        _factory?.Dispose();
     }
 }

@@ -1,3 +1,6 @@
+using System;
+using System.Runtime.InteropServices;
+using Glacier.Compute.Memory;
 using Glacier.Gpu.Compilation;
 using Xunit;
 
@@ -25,7 +28,7 @@ public class KernelCompilerTests
     }
 
     [Fact]
-    public void GlacierComputeBridge_BuildsPtx_AndAllocatesSlab()
+    public void GlacierComputeBridge_BuildsPtx_AndAllocatesHostAndExternalSlabs()
     {
         var builder = GlacierComputeBridge.CreatePtxBuilder("custom_gemm", 89);
         Assert.NotNull(builder);
@@ -37,6 +40,20 @@ public class KernelCompilerTests
         var ptr = slab.Allocate(256);
         Assert.False(ptr.IsNull);
         Assert.True(slab.Free(ptr));
+
+        ulong arenaSize = SlabAllocator.SingleSlotAcrossAllBinsBytes * 4;
+        IntPtr rawArena = Marshal.AllocHGlobal((nint)arenaSize);
+        bool released = false;
+        using (var extSlab = GlacierComputeBridge.CreateSlabAllocator(rawArena, arenaSize, p =>
+        {
+            Marshal.FreeHGlobal(p);
+            released = true;
+        }))
+        {
+            var extPtr = extSlab.Allocate(512);
+            Assert.False(extPtr.IsNull);
+            Assert.True(extSlab.Free(extPtr));
+        }
+        Assert.True(released);
     }
 }
-

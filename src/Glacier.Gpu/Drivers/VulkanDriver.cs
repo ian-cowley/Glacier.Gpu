@@ -6,7 +6,7 @@ using System.Text;
 
 /// <summary>
 /// Direct, zero-dependency P/Invoke bindings to the native Vulkan driver (vulkan-1.dll on Windows, libvulkan.so.1 on Linux).
-/// Enables universal cross-vendor compute acceleration and checks for VK_KHR_cooperative_matrix hardware tensor support.
+/// Uses strictly blittable structs and pointers for Native AOT compatibility.
 /// </summary>
 public static unsafe class VulkanDriver
 {
@@ -38,6 +38,7 @@ public static unsafe class VulkanDriver
     public const uint VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT = 0x00000001;
     public const uint VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT = 0x00000002;
     public const uint VK_MEMORY_PROPERTY_HOST_COHERENT_BIT = 0x00000004;
+    public const uint VK_MEMORY_HEAP_DEVICE_LOCAL_BIT = 0x00000001;
     public const int VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO = 18;
     public const int VK_DESCRIPTOR_TYPE_STORAGE_BUFFER = 7;
     public const uint VK_SHADER_STAGE_COMPUTE_BIT = 0x00000020;
@@ -106,11 +107,20 @@ public static unsafe class VulkanDriver
         public uint vendorID;
         public uint deviceID;
         public uint deviceType;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)]
-        public string deviceName;
+        public fixed byte deviceNameBytes[256];
         public fixed byte pipelineCacheUUID[16];
         public VkPhysicalDeviceLimits limits;
         public VkPhysicalDeviceSparseProperties sparseProperties;
+
+        public string GetDeviceName()
+        {
+            fixed (byte* ptr = deviceNameBytes)
+            {
+                int len = 0;
+                while (len < 256 && ptr[len] != 0) len++;
+                return Encoding.UTF8.GetString(ptr, len);
+            }
+        }
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -263,9 +273,9 @@ public static unsafe class VulkanDriver
     public struct VkPhysicalDeviceMemoryProperties
     {
         public uint memoryTypeCount;
-        public fixed byte memoryTypes[256]; // 32 * sizeof(VkMemoryType)
+        public fixed byte memoryTypes[256];
         public uint memoryHeapCount;
-        public fixed byte memoryHeaps[256]; // 16 * sizeof(VkMemoryHeap)
+        public fixed byte memoryHeaps[256];
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -373,13 +383,38 @@ public static unsafe class VulkanDriver
     public static extern void DestroyInstance(IntPtr instance, IntPtr pAllocator);
 
     [DllImport(VulkanLib, EntryPoint = "vkEnumeratePhysicalDevices")]
-    public static extern int EnumeratePhysicalDevices(IntPtr instance, ref uint pPhysicalDeviceCount, [Out] IntPtr[]? pPhysicalDevices);
+    public static extern int EnumeratePhysicalDevices(IntPtr instance, ref uint pPhysicalDeviceCount, IntPtr* pPhysicalDevices);
+
+    public static int EnumeratePhysicalDevices(IntPtr instance, ref uint pPhysicalDeviceCount, IntPtr[]? pPhysicalDevices)
+    {
+        if (pPhysicalDevices == null)
+        {
+            return EnumeratePhysicalDevices(instance, ref pPhysicalDeviceCount, (IntPtr*)null);
+        }
+        fixed (IntPtr* pDevs = pPhysicalDevices)
+        {
+            return EnumeratePhysicalDevices(instance, ref pPhysicalDeviceCount, pDevs);
+        }
+    }
 
     [DllImport(VulkanLib, EntryPoint = "vkGetPhysicalDeviceProperties")]
     public static extern void GetPhysicalDeviceProperties(IntPtr physicalDevice, out VkPhysicalDeviceProperties pProperties);
 
     [DllImport(VulkanLib, EntryPoint = "vkGetPhysicalDeviceQueueFamilyProperties")]
-    public static extern void GetPhysicalDeviceQueueFamilyProperties(IntPtr physicalDevice, ref uint pQueueFamilyPropertyCount, [Out] VkQueueFamilyProperties[]? pQueueFamilyProperties);
+    public static extern void GetPhysicalDeviceQueueFamilyProperties(IntPtr physicalDevice, ref uint pQueueFamilyPropertyCount, VkQueueFamilyProperties* pQueueFamilyProperties);
+
+    public static void GetPhysicalDeviceQueueFamilyProperties(IntPtr physicalDevice, ref uint pQueueFamilyPropertyCount, VkQueueFamilyProperties[]? pQueueFamilyProperties)
+    {
+        if (pQueueFamilyProperties == null)
+        {
+            GetPhysicalDeviceQueueFamilyProperties(physicalDevice, ref pQueueFamilyPropertyCount, (VkQueueFamilyProperties*)null);
+            return;
+        }
+        fixed (VkQueueFamilyProperties* pProps = pQueueFamilyProperties)
+        {
+            GetPhysicalDeviceQueueFamilyProperties(physicalDevice, ref pQueueFamilyPropertyCount, pProps);
+        }
+    }
 
     [DllImport(VulkanLib, EntryPoint = "vkGetPhysicalDeviceMemoryProperties")]
     public static extern void GetPhysicalDeviceMemoryProperties(IntPtr physicalDevice, out VkPhysicalDeviceMemoryProperties pMemoryProperties);
@@ -430,7 +465,16 @@ public static unsafe class VulkanDriver
     public static extern void DestroyCommandPool(IntPtr device, IntPtr commandPool, IntPtr pAllocator);
 
     [DllImport(VulkanLib, EntryPoint = "vkAllocateCommandBuffers")]
-    public static extern int AllocateCommandBuffers(IntPtr device, ref VkCommandBufferAllocateInfo pAllocateInfo, [Out] IntPtr[] pCommandBuffers);
+    public static extern int AllocateCommandBuffers(IntPtr device, ref VkCommandBufferAllocateInfo pAllocateInfo, IntPtr* pCommandBuffers);
+
+    public static int AllocateCommandBuffers(IntPtr device, ref VkCommandBufferAllocateInfo pAllocateInfo, IntPtr[] pCommandBuffers)
+    {
+        ArgumentNullException.ThrowIfNull(pCommandBuffers);
+        fixed (IntPtr* pCmds = pCommandBuffers)
+        {
+            return AllocateCommandBuffers(device, ref pAllocateInfo, pCmds);
+        }
+    }
 
     [DllImport(VulkanLib, EntryPoint = "vkBeginCommandBuffer")]
     public static extern int BeginCommandBuffer(IntPtr commandBuffer, ref VkCommandBufferBeginInfo pBeginInfo);
@@ -585,7 +629,18 @@ public static unsafe class VulkanDriver
     public static extern void DestroyPipelineLayout(IntPtr device, IntPtr pipelineLayout, IntPtr pAllocator);
 
     [DllImport(VulkanLib, EntryPoint = "vkCreateComputePipelines")]
-    public static extern int CreateComputePipelines(IntPtr device, IntPtr pipelineCache, uint createInfoCount, [In] VkComputePipelineCreateInfo[] pCreateInfos, IntPtr pAllocator, [Out] IntPtr[] pPipelines);
+    public static extern int CreateComputePipelines(IntPtr device, IntPtr pipelineCache, uint createInfoCount, VkComputePipelineCreateInfo* pCreateInfos, IntPtr pAllocator, IntPtr* pPipelines);
+
+    public static int CreateComputePipelines(IntPtr device, IntPtr pipelineCache, uint createInfoCount, VkComputePipelineCreateInfo[] pCreateInfos, IntPtr pAllocator, IntPtr[] pPipelines)
+    {
+        ArgumentNullException.ThrowIfNull(pCreateInfos);
+        ArgumentNullException.ThrowIfNull(pPipelines);
+        fixed (VkComputePipelineCreateInfo* pIn = pCreateInfos)
+        fixed (IntPtr* pOut = pPipelines)
+        {
+            return CreateComputePipelines(device, pipelineCache, createInfoCount, pIn, pAllocator, pOut);
+        }
+    }
 
     [DllImport(VulkanLib, EntryPoint = "vkDestroyPipeline")]
     public static extern void DestroyPipeline(IntPtr device, IntPtr pipeline, IntPtr pAllocator);
@@ -597,16 +652,43 @@ public static unsafe class VulkanDriver
     public static extern void DestroyDescriptorPool(IntPtr device, IntPtr descriptorPool, IntPtr pAllocator);
 
     [DllImport(VulkanLib, EntryPoint = "vkAllocateDescriptorSets")]
-    public static extern int AllocateDescriptorSets(IntPtr device, ref VkDescriptorSetAllocateInfo pAllocateInfo, [Out] IntPtr[] pDescriptorSets);
+    public static extern int AllocateDescriptorSets(IntPtr device, ref VkDescriptorSetAllocateInfo pAllocateInfo, IntPtr* pDescriptorSets);
+
+    public static int AllocateDescriptorSets(IntPtr device, ref VkDescriptorSetAllocateInfo pAllocateInfo, IntPtr[] pDescriptorSets)
+    {
+        ArgumentNullException.ThrowIfNull(pDescriptorSets);
+        fixed (IntPtr* pSets = pDescriptorSets)
+        {
+            return AllocateDescriptorSets(device, ref pAllocateInfo, pSets);
+        }
+    }
 
     [DllImport(VulkanLib, EntryPoint = "vkUpdateDescriptorSets")]
-    public static extern void UpdateDescriptorSets(IntPtr device, uint descriptorWriteCount, [In] VkWriteDescriptorSet[] pDescriptorWrites, uint descriptorCopyCount, IntPtr pDescriptorCopies);
+    public static extern void UpdateDescriptorSets(IntPtr device, uint descriptorWriteCount, VkWriteDescriptorSet* pDescriptorWrites, uint descriptorCopyCount, IntPtr pDescriptorCopies);
+
+    public static void UpdateDescriptorSets(IntPtr device, uint descriptorWriteCount, VkWriteDescriptorSet[] pDescriptorWrites, uint descriptorCopyCount, IntPtr pDescriptorCopies)
+    {
+        ArgumentNullException.ThrowIfNull(pDescriptorWrites);
+        fixed (VkWriteDescriptorSet* pWrites = pDescriptorWrites)
+        {
+            UpdateDescriptorSets(device, descriptorWriteCount, pWrites, descriptorCopyCount, pDescriptorCopies);
+        }
+    }
 
     [DllImport(VulkanLib, EntryPoint = "vkCmdBindPipeline")]
     public static extern void CmdBindPipeline(IntPtr commandBuffer, int pipelineBindPoint, IntPtr pipeline);
 
     [DllImport(VulkanLib, EntryPoint = "vkCmdBindDescriptorSets")]
-    public static extern void CmdBindDescriptorSets(IntPtr commandBuffer, int pipelineBindPoint, IntPtr layout, uint firstSet, uint descriptorSetCount, [In] IntPtr[] pDescriptorSets, uint dynamicOffsetCount, IntPtr pDynamicOffsets);
+    public static extern void CmdBindDescriptorSets(IntPtr commandBuffer, int pipelineBindPoint, IntPtr layout, uint firstSet, uint descriptorSetCount, IntPtr* pDescriptorSets, uint dynamicOffsetCount, IntPtr pDynamicOffsets);
+
+    public static void CmdBindDescriptorSets(IntPtr commandBuffer, int pipelineBindPoint, IntPtr layout, uint firstSet, uint descriptorSetCount, IntPtr[] pDescriptorSets, uint dynamicOffsetCount, IntPtr pDynamicOffsets)
+    {
+        ArgumentNullException.ThrowIfNull(pDescriptorSets);
+        fixed (IntPtr* pSets = pDescriptorSets)
+        {
+            CmdBindDescriptorSets(commandBuffer, pipelineBindPoint, layout, firstSet, descriptorSetCount, pSets, dynamicOffsetCount, pDynamicOffsets);
+        }
+    }
 
     [DllImport(VulkanLib, EntryPoint = "vkCmdPushConstants")]
     public static extern void CmdPushConstants(IntPtr commandBuffer, IntPtr layout, uint stageFlags, uint offset, uint size, IntPtr pValues);
@@ -616,7 +698,6 @@ public static unsafe class VulkanDriver
 
     [DllImport(VulkanLib, EntryPoint = "vkResetCommandBuffer")]
     public static extern int ResetCommandBuffer(IntPtr commandBuffer, uint flags);
-
 
     public static uint MakeVersion(uint major, uint minor, uint patch) => (major << 22) | (minor << 12) | patch;
 

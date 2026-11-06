@@ -20,10 +20,19 @@ public static class GlacierComputeBridge
     }
 
     /// <summary>
-    /// Creates a high-performance device memory slab allocator.
+    /// Creates a high-performance host-backed slab allocator with lazy arena initialization.
     /// </summary>
     public static SlabAllocator CreateSlabAllocator(int slotsPerBin = 1024)
     {
         return new SlabAllocator(slotsPerBin);
+    }
+
+    /// <summary>
+    /// Creates a high-performance device-resident or pinned-memory slab allocator backed by an external arena
+    /// (for example <c>cuMemAlloc</c>, <c>cuMemHostAlloc</c>, or Direct3D 12 zero-copy heaps).
+    /// </summary>
+    public static SlabAllocator CreateSlabAllocator(IntPtr baseAddress, ulong byteLength, Action<IntPtr>? releaseAction = null)
+    {
+        return new SlabAllocator(baseAddress, byteLength, releaseAction);
     }
 }

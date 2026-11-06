@@ -187,20 +187,19 @@ using Glacier.Gpu.RingBuffer;
 using var nvidia = new NvidiaSassEngine();
 nvidia.Initialize();
 
-// Allocate host-pinned memory block mapped to the GPU virtual address space
-using var taskBlock = nvidia.AllocateUnifiedMemory<GpuWorkTask>(1);
-using var ringBuffer = new PersistentRingBuffer(taskBlock.HostPointer, taskBlock.DevicePointer);
+// Launch the 64-slot persistent ring buffer worker on a dedicated non-blocking CUDA stream
+PersistentRingBuffer ringBuffer = nvidia.GetOrCreateRingBuffer();
 
-// Declare buffer pointer addresses
+// Declare device buffer addresses
 ulong bufA = 0x1000, bufB = 0x2000, bufC = 0x3000;
 
-// Enqueue tasks into the ring buffer with 100 ns dispatch latency
-for (uint i = 0; i < 50_000; i++)
+// Enqueue tasks into the circular ring buffer with sub-microsecond dispatch latency
+for (uint i = 0; i < 32; i++)
 {
     ringBuffer.Enqueue(TaskOpCode.VectorAdd, elementCount: 256, bufA, bufB, bufC);
 }
 
-// Submit a task and wait for GPU completion with low-overhead spinwait
+// Submit a task and wait for GPU completion with bounded spinwait
 ringBuffer.SubmitAndWait(TaskOpCode.VectorAdd, elementCount: 256, bufA, bufB, bufC);
 ```
 

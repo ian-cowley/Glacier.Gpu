@@ -6,46 +6,29 @@ using Glacier.Gpu.Engines;
 namespace Glacier.Gpu.Factory;
 
 /// <summary>
-/// Discovers system GPU topology and instantiates optimal compute engines.
+/// Discovers system GPU topology and instantiates real bare-metal hardware compute engines.
 /// </summary>
 public static class GpuEngineFactory
 {
     public static bool HasNvidiaGpu => CuDriver.IsAvailable();
-    public static bool HasAmdGpu => HipDriver.IsAvailable() || HasAmdD3D12 || HasVulkan;
-    public static bool HasDirectMl => DirectMlDriver.IsAvailable();
-    public static bool HasIntelGpu => DirectMlDriver.HasIntelGpu;
-    public static bool HasD3D12 => OperatingSystem.IsWindows();
-    public static bool HasVulkan => VulkanDriver.IsAvailable();
-
-    public static bool HasAmdD3D12
-    {
-        get
-        {
-            if (!OperatingSystem.IsWindows()) return false;
-            try
-            {
-                using var f = Vortice.DXGI.DXGI.CreateDXGIFactory1<Vortice.DXGI.IDXGIFactory4>();
-                for (uint i = 0; f.EnumAdapters1(i, out Vortice.DXGI.IDXGIAdapter1 a).Success; i++)
-                {
-                    var desc = a.Description1;
-                    bool isAmd = (desc.Flags & Vortice.DXGI.AdapterFlags.Software) == 0 &&
-                                 (desc.VendorId == 0x1002 || desc.Description.Contains("Radeon", StringComparison.OrdinalIgnoreCase));
-                    a.Dispose();
-                    if (isAmd) return true;
-                }
-                return false;
-            }
-            catch { return false; }
-        }
-    }
+    public static bool HasAmdGpu => HipDriver.IsAvailable() || HasAmdD3D12 || VulkanContext.HasDeviceForVendor(0x1002);
+    public static bool HasDirectMl => DirectMlDriver.IsAvailable() && DirectMlDriver.HasHardwareAdapter;
+    public static bool HasIntelGpu => DirectMlDriver.HasIntelGpu || VulkanContext.HasDeviceForVendor(0x8086);
+    public static bool HasD3D12 => OperatingSystem.IsWindows() && DirectMlDriver.HasHardwareAdapter;
+    public static bool HasVulkan => VulkanContext.IsSupported;
+    public static bool HasAmdD3D12 => OperatingSystem.IsWindows() && DirectMlDriver.HasAmdGpu;
 
     public static IGpuEngine CreateOptimalEngine()
     {
-        if (HasNvidiaGpu && HasAmdGpu)
+        if (HasNvidiaGpu && HipDriver.IsAvailable())
         {
-            var het = new HeterogeneousEngine();
-            het.Initialize();
-            return het;
+            try
+            {
+                var het = new HeterogeneousEngine();
+                het.Initialize();
+                return het;
+            }
+            catch { }
         }
 
         if (HasNvidiaGpu)
@@ -62,7 +45,7 @@ public static class GpuEngineFactory
             return d3d;
         }
 
-        if (HasAmdGpu && HipDriver.IsAvailable())
+        if (HipDriver.IsAvailable())
         {
             var amd = new AmdRdnaEngine();
             amd.Initialize();
@@ -80,14 +63,6 @@ public static class GpuEngineFactory
             catch { }
         }
 
-        if (HasDirectMl)
-        {
-            // Accelerated DirectML engine for Intel Arc, AMD iGPUs, or any DX12 GPU
-            var dml = new DirectMlEngine();
-            dml.Initialize();
-            return dml;
-        }
-
         if (HasD3D12)
         {
             var d3d = new D3D12ComputeEngine();
@@ -95,7 +70,7 @@ public static class GpuEngineFactory
             return d3d;
         }
 
-        throw new PlatformNotSupportedException("No supported bare-metal GPU driver found on this system.");
+        throw new PlatformNotSupportedException("No supported bare-metal GPU compute driver found on this system.");
     }
 
     public static NvidiaSassEngine? TryCreateNvidiaEngine()
@@ -157,6 +132,7 @@ public static class GpuEngineFactory
 
     public static HeterogeneousEngine? TryCreateHeterogeneousEngine()
     {
+        if (!HasNvidiaGpu || !HipDriver.IsAvailable()) return null;
         try
         {
             var het = new HeterogeneousEngine();
@@ -169,6 +145,7 @@ public static class GpuEngineFactory
         }
     }
 
+    [Obsolete("DirectMlEngine is a read-only adapter topology probe without compute dispatch. Use TryCreateD3D12Engine or TryCreateVulkanEngine for GPU compute execution.")]
     public static DirectMlEngine? TryCreateDirectMlEngine(int adapterIndex = -1)
     {
         if (!HasDirectMl) return null;
@@ -184,27 +161,28 @@ public static class GpuEngineFactory
         }
     }
 
-    public static DirectMlEngine? TryCreateIntelEngine()
+    public static IGpuEngine? TryCreateIntelEngine()
     {
-        if (!HasIntelGpu || !HasDirectMl) return null;
-        try
+        if (!HasIntelGpu) return null;
+        if (OperatingSystem.IsWindows())
         {
-            var adapters = DirectMlDriver.GetAdapters();
-            for (int i = 0; i < adapters.Count; i++)
+            try
             {
-                if (adapters[i].IsIntel)
+                var adapters = DirectMlDriver.GetAdapters();
+                for (int i = 0; i < adapters.Count; i++)
                 {
-                    var dml = new DirectMlEngine(i);
-                    dml.Initialize();
-                    return dml;
+                    if (adapters[i].IsIntel)
+                    {
+                        var d3d = new D3D12ComputeEngine(adapters[i].Index);
+                        d3d.Initialize();
+                        return d3d;
+                    }
                 }
             }
-            return null;
+            catch { }
         }
-        catch
-        {
-            return null;
-        }
+
+        return TryCreateVulkanEngine();
     }
 
     public static VulkanEngine? TryCreateVulkanEngine()

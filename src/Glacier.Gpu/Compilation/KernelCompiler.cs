@@ -20,6 +20,8 @@ public static class KernelCompiler
         @"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\bin\ptxas.exe",
         @"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin\ptxas.exe",
         @"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.0\bin\ptxas.exe",
+        "/usr/local/cuda/bin/ptxas",
+        "/usr/bin/ptxas",
         "ptxas.exe"
     };
 
@@ -33,19 +35,44 @@ public static class KernelCompiler
     }
 
     /// <summary>
-    /// Compiles PTX into SASS cubin machine code. If ptxas is unavailable, returns UTF8 PTX bytes for driver JIT.
+    /// Aligns both <c>.version</c> and <c>.target</c> PTX header directives with <paramref name="targetArch"/>
+    /// so PTX ISA minimum version requirements are satisfied across Turing (sm_75), Ampere (sm_80/86), Ada (sm_89), Hopper (sm_90), and Blackwell (sm_100/120).
+    /// </summary>
+    public static string NormalizePtxDirectives(string ptxCode, string targetArch)
+    {
+        ArgumentNullException.ThrowIfNull(ptxCode);
+        if (string.IsNullOrWhiteSpace(targetArch) || !targetArch.StartsWith("sm_", StringComparison.Ordinal))
+            return ptxCode;
+
+        string requiredPtxVersion = "7.5";
+        if (int.TryParse(targetArch.AsSpan(3), out int smNum))
+        {
+            if (smNum >= 100)
+                requiredPtxVersion = "8.7";
+            else if (smNum >= 89)
+                requiredPtxVersion = "8.0";
+            else if (smNum >= 75)
+                requiredPtxVersion = "7.5";
+            else
+                requiredPtxVersion = "7.0";
+        }
+
+        ptxCode = ReplaceHeaderDirective(ptxCode, ".version ", requiredPtxVersion);
+        ptxCode = ReplaceHeaderDirective(ptxCode, ".target ", targetArch);
+        return ptxCode;
+    }
+
+    /// <summary>
+    /// Compiles PTX into SASS cubin machine code. If ptxas is unavailable, returns null-terminated UTF8 PTX bytes for driver JIT.
     /// </summary>
     public static byte[] CompileOrPreparePtx(string ptxCode, string targetArch = "sm_89")
     {
-        if (!string.IsNullOrWhiteSpace(targetArch) && targetArch.StartsWith("sm_"))
-        {
-            ptxCode = System.Text.RegularExpressions.Regex.Replace(ptxCode, @"\.target\s+sm_\d+", $".target {targetArch}");
-        }
+        ArgumentNullException.ThrowIfNull(ptxCode);
+        ptxCode = NormalizePtxDirectives(ptxCode, targetArch);
 
         string? ptxas = LocatePtxas();
         if (ptxas == null)
         {
-            // Fallback: driver-level JIT directly via cuModuleLoadData
             return Encoding.UTF8.GetBytes(ptxCode + "\0");
         }
 
@@ -72,19 +99,27 @@ public static class KernelCompiler
             using var proc = Process.Start(psi);
             if (proc != null)
             {
-                string stdErr = proc.StandardError.ReadToEnd();
-                string stdOut = proc.StandardOutput.ReadToEnd();
-                proc.WaitForExit();
+                var stdOutTask = proc.StandardOutput.ReadToEndAsync();
+                var stdErrTask = proc.StandardError.ReadToEndAsync();
 
-                if (proc.ExitCode == 0 && File.Exists(cubinFile))
+                if (proc.WaitForExit(10_000))
                 {
-                    return File.ReadAllBytes(cubinFile);
+                    _ = stdOutTask.GetAwaiter().GetResult();
+                    _ = stdErrTask.GetAwaiter().GetResult();
+                    if (proc.ExitCode == 0 && File.Exists(cubinFile))
+                    {
+                        return File.ReadAllBytes(cubinFile);
+                    }
+                }
+                else
+                {
+                    try { proc.Kill(entireProcessTree: true); } catch { }
                 }
             }
         }
         catch
         {
-            // Silently fall back to driver JIT
+            // Fall back cleanly to CUDA driver JIT via cuModuleLoadData
         }
         finally
         {
@@ -96,5 +131,19 @@ public static class KernelCompiler
         }
 
         return Encoding.UTF8.GetBytes(ptxCode + "\0");
+    }
+
+    private static string ReplaceHeaderDirective(string ptxCode, string directivePrefix, string newValue)
+    {
+        int idx = ptxCode.IndexOf(directivePrefix, StringComparison.Ordinal);
+        if (idx < 0) return ptxCode;
+
+        int lineEnd = ptxCode.IndexOfAny(['\r', '\n'], idx);
+        if (lineEnd < 0)
+        {
+            return string.Concat(ptxCode.AsSpan(0, idx), directivePrefix, newValue);
+        }
+
+        return string.Concat(ptxCode.AsSpan(0, idx), directivePrefix, newValue, ptxCode.AsSpan(lineEnd));
     }
 }

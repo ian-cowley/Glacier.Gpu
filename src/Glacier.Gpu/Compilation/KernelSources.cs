@@ -2,12 +2,13 @@ namespace Glacier.Gpu.Compilation;
 
 /// <summary>
 /// Embedded hardware compute kernels in PTX and high-performance assembly.
+/// Targets baseline PTX 7.5 / sm_75 (Turing+) and scales dynamically via KernelCompiler.
 /// </summary>
 public static class KernelSources
 {
     public const string VectorAddPtx = @"
-.version 8.0
-.target sm_89
+.version 7.5
+.target sm_75
 .address_size 64
 
 .visible .entry vector_add(
@@ -54,8 +55,8 @@ DONE:
 ";
 
     public const string VectorFmaPtx = @"
-.version 8.0
-.target sm_89
+.version 7.5
+.target sm_75
 .address_size 64
 
 .visible .entry vector_fma_benchmark(
@@ -137,12 +138,13 @@ DONE:
 ";
 
     public const string PersistentWorkerPtx = @"
-.version 8.0
-.target sm_89
+.version 7.5
+.target sm_75
 .address_size 64
 
 .visible .entry persistent_ring_worker(
-    .param .u64 task_ptr
+    .param .u64 task_ptr,
+    .param .u32 ring_mask
 )
 {
     .shared .align 8 .u32 s_opcode;
@@ -153,37 +155,41 @@ DONE:
     .shared .align 4 .f32 s_scalar;
 
     .reg .pred %p_is_worker, %p_has_task, %p_exit, %p_add, %p_fma, %p_done;
-    .reg .b32 %r_tid, %opcode, %status, %count, %last_task_id, %curr_task_id, %r_idx, %r_stride;
-    .reg .b64 %rd_task, %rd_bufA, %rd_bufB, %rd_bufC, %rd_offset, %rd_ptr;
+    .reg .b32 %r_tid, %opcode, %status, %count, %expected_task_id, %curr_task_id, %r_idx, %r_stride, %r_slot, %r_mask;
+    .reg .b64 %rd_task, %rd_slot_ptr, %rd_slot_off, %rd_bufA, %rd_bufB, %rd_bufC, %rd_offset, %rd_ptr;
     .reg .f32 %fA, %fB, %fC, %f_scalar;
 
     ld.param.u64 %rd_task, [task_ptr];
+    ld.param.u32 %r_mask, [ring_mask];
     mov.u32 %r_tid, %tid.x;
-    mov.u32 %last_task_id, 0;
+    mov.u32 %r_slot, 0;
+    mov.u32 %expected_task_id, 1;
     setp.ne.u32 %p_is_worker, %r_tid, 0;
 
 POLL_LOOP:
     @%p_is_worker bra WAIT_FOR_POLL;
 
+    cvt.u64.u32 %rd_slot_off, %r_slot;
+    shl.b64 %rd_slot_off, %rd_slot_off, 6;
+    add.u64 %rd_slot_ptr, %rd_task, %rd_slot_off;
+
 MASTER_POLL:
-    ld.acquire.sys.global.u32 %curr_task_id, [%rd_task];
-    setp.ne.u32 %p_has_task, %curr_task_id, %last_task_id;
+    ld.acquire.sys.global.u32 %curr_task_id, [%rd_slot_ptr];
+    setp.eq.u32 %p_has_task, %curr_task_id, %expected_task_id;
     @!%p_has_task bra MASTER_POLL;
 
-    mov.u32 %last_task_id, %curr_task_id;
-
 BROADCAST_TASK:
-    ld.acquire.sys.global.u32 %opcode, [%rd_task + 4];
+    ld.global.u32 %opcode, [%rd_slot_ptr + 4];
     st.shared.u32 [s_opcode], %opcode;
-    ld.global.u32 %count, [%rd_task + 8];
+    ld.global.u32 %count, [%rd_slot_ptr + 8];
     st.shared.u32 [s_count], %count;
-    ld.global.u64 %rd_bufA, [%rd_task + 16];
+    ld.global.u64 %rd_bufA, [%rd_slot_ptr + 16];
     st.shared.u64 [s_bufA], %rd_bufA;
-    ld.global.u64 %rd_bufB, [%rd_task + 24];
+    ld.global.u64 %rd_bufB, [%rd_slot_ptr + 24];
     st.shared.u64 [s_bufB], %rd_bufB;
-    ld.global.u64 %rd_bufC, [%rd_task + 32];
+    ld.global.u64 %rd_bufC, [%rd_slot_ptr + 32];
     st.shared.u64 [s_bufC], %rd_bufC;
-    ld.global.f32 %f_scalar, [%rd_task + 48];
+    ld.global.f32 %f_scalar, [%rd_slot_ptr + 48];
     st.shared.f32 [s_scalar], %f_scalar;
 
 WAIT_FOR_POLL:
@@ -261,12 +267,18 @@ WORK_COMPLETE:
 
     @%p_is_worker bra POLL_LOOP;
 
-    membar.sys;
     mov.u32 %status, 1;
-    st.global.volatile.u32 [%rd_task + 12], %status;
+    st.release.sys.global.u32 [%rd_slot_ptr + 12], %status;
+    add.u32 %expected_task_id, %expected_task_id, 1;
+    add.u32 %r_slot, %r_slot, 1;
+    and.b32 %r_slot, %r_slot, %r_mask;
     bra POLL_LOOP;
 
 EXIT_WORKER:
+    @%p_is_worker bra DONE_EXIT;
+    mov.u32 %status, 1;
+    st.release.sys.global.u32 [%rd_slot_ptr + 12], %status;
+DONE_EXIT:
     ret;
 }
 ";
@@ -276,8 +288,8 @@ EXIT_WORKER:
     /// Emits 8-byte ClavierDecision (uint ActionId, float Confidence) directly in GPU device memory.
     /// </summary>
     public const string ArgmaxReductionPtx = @"
-.version 8.0
-.target sm_86
+.version 7.5
+.target sm_75
 .address_size 64
 
 .visible .entry argmax_reduction_f32(

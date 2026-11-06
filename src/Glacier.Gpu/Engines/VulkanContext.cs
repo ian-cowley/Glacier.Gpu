@@ -1,12 +1,11 @@
 namespace Glacier.Gpu.Engines;
 
-using Glacier.Gpu.Drivers;
-
 using System;
 using System.Runtime.InteropServices;
+using Glacier.Gpu.Drivers;
 
 /// <summary>
-/// Universal Vulkan 1.3+ compute context.
+/// Universal Vulkan 1.2+ compute context.
 /// Manages instance creation, physical device selection, compute queue creation, and memory management.
 /// Designed for zero-dependency cross-vendor execution on AMD, Intel, and NVIDIA across Windows and Linux.
 /// </summary>
@@ -23,6 +22,8 @@ public sealed unsafe class VulkanContext : IDisposable
     private bool _disposed;
 
     public string DeviceName { get; }
+    public uint VendorId { get; }
+    public uint PhysicalDeviceType { get; }
     public ulong TotalVramBytes { get; }
     public int DeviceOrdinal { get; }
     public bool HasCooperativeMatrix { get; }
@@ -53,8 +54,16 @@ public sealed unsafe class VulkanContext : IDisposable
                 int res = VulkanDriver.CreateInstance(ref createInfo, IntPtr.Zero, out IntPtr inst);
                 if (res == 0 && inst != IntPtr.Zero)
                 {
-                    VulkanDriver.DestroyInstance(inst, IntPtr.Zero);
-                    return true;
+                    try
+                    {
+                        uint devCount = 0;
+                        int enumRes = VulkanDriver.EnumeratePhysicalDevices(inst, ref devCount, (IntPtr*)null);
+                        return enumRes == 0 && devCount > 0;
+                    }
+                    finally
+                    {
+                        VulkanDriver.DestroyInstance(inst, IntPtr.Zero);
+                    }
                 }
                 return false;
             }
@@ -62,6 +71,54 @@ public sealed unsafe class VulkanContext : IDisposable
             {
                 return false;
             }
+        }
+    }
+
+    public static bool HasDeviceForVendor(uint vendorId)
+    {
+        try
+        {
+            if (!VulkanDriver.IsAvailable()) return false;
+            var appInfo = new VulkanDriver.VkApplicationInfo
+            {
+                sType = VulkanDriver.VK_STRUCTURE_TYPE_APPLICATION_INFO,
+                apiVersion = VulkanDriver.MakeVersion(1, 2, 0)
+            };
+            var createInfo = new VulkanDriver.VkInstanceCreateInfo
+            {
+                sType = VulkanDriver.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+                pApplicationInfo = new IntPtr(&appInfo)
+            };
+            int res = VulkanDriver.CreateInstance(ref createInfo, IntPtr.Zero, out IntPtr inst);
+            if (res != 0 || inst == IntPtr.Zero) return false;
+
+            try
+            {
+                uint devCount = 0;
+                if (VulkanDriver.EnumeratePhysicalDevices(inst, ref devCount, (IntPtr*)null) != 0 || devCount == 0)
+                    return false;
+
+                var devices = new IntPtr[devCount];
+                if (VulkanDriver.EnumeratePhysicalDevices(inst, ref devCount, devices) != 0)
+                    return false;
+
+                for (uint i = 0; i < devCount; i++)
+                {
+                    VulkanDriver.GetPhysicalDeviceProperties(devices[i], out var props);
+                    // Exclude VK_PHYSICAL_DEVICE_TYPE_CPU (4)
+                    if (props.vendorID == vendorId && props.deviceType != 4)
+                        return true;
+                }
+                return false;
+            }
+            finally
+            {
+                VulkanDriver.DestroyInstance(inst, IntPtr.Zero);
+            }
+        }
+        catch
+        {
+            return false;
         }
     }
 
@@ -94,104 +151,119 @@ public sealed unsafe class VulkanContext : IDisposable
         if (res != 0 || _instance == IntPtr.Zero)
             throw new InvalidOperationException($"Failed to create Vulkan instance: code {res}");
 
-        // 2. Enumerate Physical Devices
-        uint devCount = 0;
-        VulkanDriver.EnumeratePhysicalDevices(_instance, ref devCount, null);
-        if (devCount == 0)
-            throw new InvalidOperationException("No Vulkan physical devices found on this system.");
-
-        var devices = new IntPtr[devCount];
-        VulkanDriver.EnumeratePhysicalDevices(_instance, ref devCount, devices);
-
-        DeviceOrdinal = Math.Clamp(deviceOrdinal, 0, (int)devCount - 1);
-        _physicalDevice = devices[DeviceOrdinal];
-
-        VulkanDriver.GetPhysicalDeviceProperties(_physicalDevice, out var props);
-        DeviceName = props.deviceName;
-
-        VulkanDriver.GetPhysicalDeviceMemoryProperties(_physicalDevice, out _memProps);
-        ulong totalMem = 0;
-        fixed (byte* pHeaps = _memProps.memoryHeaps)
+        try
         {
-            var heaps = (VulkanDriver.VkMemoryHeap*)pHeaps;
-            for (uint h = 0; h < _memProps.memoryHeapCount; h++)
+            // 2. Enumerate Physical Devices
+            uint devCount = 0;
+            VulkanDriver.EnumeratePhysicalDevices(_instance, ref devCount, (IntPtr*)null);
+            if (devCount == 0)
+                throw new InvalidOperationException("No Vulkan physical devices found on this system.");
+
+            var devices = new IntPtr[devCount];
+            VulkanDriver.EnumeratePhysicalDevices(_instance, ref devCount, devices);
+
+            DeviceOrdinal = Math.Clamp(deviceOrdinal, 0, (int)devCount - 1);
+            _physicalDevice = devices[DeviceOrdinal];
+
+            VulkanDriver.GetPhysicalDeviceProperties(_physicalDevice, out var props);
+            DeviceName = props.GetDeviceName();
+            VendorId = props.vendorID;
+            PhysicalDeviceType = props.deviceType;
+
+            VulkanDriver.GetPhysicalDeviceMemoryProperties(_physicalDevice, out _memProps);
+            ulong deviceLocalMem = 0;
+            ulong allHeapsMem = 0;
+            fixed (byte* pHeaps = _memProps.memoryHeaps)
             {
-                totalMem += heaps[h].size;
+                var heaps = (VulkanDriver.VkMemoryHeap*)pHeaps;
+                for (uint h = 0; h < _memProps.memoryHeapCount; h++)
+                {
+                    allHeapsMem += heaps[h].size;
+                    if ((heaps[h].flags & VulkanDriver.VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0)
+                    {
+                        deviceLocalMem += heaps[h].size;
+                    }
+                }
             }
-        }
-        TotalVramBytes = totalMem;
+            TotalVramBytes = deviceLocalMem > 0 ? deviceLocalMem : allHeapsMem;
 
-        // 3. Find Compute Queue Family
-        uint qfCount = 0;
-        VulkanDriver.GetPhysicalDeviceQueueFamilyProperties(_physicalDevice, ref qfCount, null);
-        var qfProps = new VulkanDriver.VkQueueFamilyProperties[qfCount];
-        VulkanDriver.GetPhysicalDeviceQueueFamilyProperties(_physicalDevice, ref qfCount, qfProps);
+            // 3. Find Compute Queue Family
+            uint qfCount = 0;
+            VulkanDriver.GetPhysicalDeviceQueueFamilyProperties(_physicalDevice, ref qfCount, (VulkanDriver.VkQueueFamilyProperties*)null);
+            var qfProps = new VulkanDriver.VkQueueFamilyProperties[qfCount];
+            VulkanDriver.GetPhysicalDeviceQueueFamilyProperties(_physicalDevice, ref qfCount, qfProps);
 
-        int computeIndex = -1;
-        for (uint i = 0; i < qfCount; i++)
-        {
-            if ((qfProps[i].queueFlags & VulkanDriver.VK_QUEUE_COMPUTE_BIT) != 0)
+            int computeIndex = -1;
+            for (uint i = 0; i < qfCount; i++)
             {
-                computeIndex = (int)i;
-                break;
+                if ((qfProps[i].queueFlags & VulkanDriver.VK_QUEUE_COMPUTE_BIT) != 0)
+                {
+                    computeIndex = (int)i;
+                    break;
+                }
             }
+
+            if (computeIndex < 0)
+                throw new InvalidOperationException($"No compute queue family found on {DeviceName}");
+
+            _computeQueueIndex = (uint)computeIndex;
+
+            // 4. Create Logical Device with Compute Queue
+            float priority = 1.0f;
+            var queueInfo = new VulkanDriver.VkDeviceQueueCreateInfo
+            {
+                sType = VulkanDriver.VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+                queueFamilyIndex = _computeQueueIndex,
+                queueCount = 1,
+                pQueuePriorities = new IntPtr(&priority)
+            };
+
+            var devInfo = new VulkanDriver.VkDeviceCreateInfo
+            {
+                sType = VulkanDriver.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+                queueCreateInfoCount = 1,
+                pQueueCreateInfos = new IntPtr(&queueInfo)
+            };
+
+            int devRes = VulkanDriver.CreateDevice(_physicalDevice, ref devInfo, IntPtr.Zero, out _device);
+            if (devRes != 0 || _device == IntPtr.Zero)
+                throw new InvalidOperationException($"Failed to create Vulkan logical device on {DeviceName}: code {devRes}");
+
+            VulkanDriver.GetDeviceQueue(_device, _computeQueueIndex, 0, out _computeQueue);
+
+            // 5. Create Compute Command Pool
+            var poolInfo = new VulkanDriver.VkCommandPoolCreateInfo
+            {
+                sType = VulkanDriver.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+                queueFamilyIndex = _computeQueueIndex,
+                flags = 2 // VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT
+            };
+
+            int poolRes = VulkanDriver.CreateCommandPool(_device, ref poolInfo, IntPtr.Zero, out _commandPool);
+            if (poolRes != 0)
+                throw new InvalidOperationException($"Failed to create Vulkan command pool: code {poolRes}");
+
+            // 6. Allocate Primary Command Buffer
+            var allocInfo = new VulkanDriver.VkCommandBufferAllocateInfo
+            {
+                sType = VulkanDriver.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                commandPool = _commandPool,
+                level = 0, // VK_COMMAND_BUFFER_LEVEL_PRIMARY
+                commandBufferCount = 1
+            };
+
+            var cmdBufs = new IntPtr[1];
+            int cmdRes = VulkanDriver.AllocateCommandBuffers(_device, ref allocInfo, cmdBufs);
+            if (cmdRes != 0)
+                throw new InvalidOperationException($"Failed to allocate Vulkan command buffer: code {cmdRes}");
+
+            _commandBuffer = cmdBufs[0];
         }
-
-        if (computeIndex < 0)
-            throw new InvalidOperationException($"No compute queue family found on {DeviceName}");
-
-        _computeQueueIndex = (uint)computeIndex;
-
-        // 4. Create Logical Device with Compute Queue
-        float priority = 1.0f;
-        var queueInfo = new VulkanDriver.VkDeviceQueueCreateInfo
+        catch
         {
-            sType = VulkanDriver.VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-            queueFamilyIndex = _computeQueueIndex,
-            queueCount = 1,
-            pQueuePriorities = new IntPtr(&priority)
-        };
-
-        var devInfo = new VulkanDriver.VkDeviceCreateInfo
-        {
-            sType = VulkanDriver.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-            queueCreateInfoCount = 1,
-            pQueueCreateInfos = new IntPtr(&queueInfo)
-        };
-
-        int devRes = VulkanDriver.CreateDevice(_physicalDevice, ref devInfo, IntPtr.Zero, out _device);
-        if (devRes != 0 || _device == IntPtr.Zero)
-            throw new InvalidOperationException($"Failed to create Vulkan logical device on {DeviceName}: code {devRes}");
-
-        VulkanDriver.GetDeviceQueue(_device, _computeQueueIndex, 0, out _computeQueue);
-
-        // 5. Create Compute Command Pool
-        var poolInfo = new VulkanDriver.VkCommandPoolCreateInfo
-        {
-            sType = VulkanDriver.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-            queueFamilyIndex = _computeQueueIndex,
-            flags = 2 // VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT
-        };
-
-        int poolRes = VulkanDriver.CreateCommandPool(_device, ref poolInfo, IntPtr.Zero, out _commandPool);
-        if (poolRes != 0)
-            throw new InvalidOperationException($"Failed to create Vulkan command pool: code {poolRes}");
-
-        // 6. Allocate Primary Command Buffer
-        var allocInfo = new VulkanDriver.VkCommandBufferAllocateInfo
-        {
-            sType = VulkanDriver.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-            commandPool = _commandPool,
-            level = 0, // VK_COMMAND_BUFFER_LEVEL_PRIMARY
-            commandBufferCount = 1
-        };
-
-        var cmdBufs = new IntPtr[1];
-        int cmdRes = VulkanDriver.AllocateCommandBuffers(_device, ref allocInfo, cmdBufs);
-        if (cmdRes != 0)
-            throw new InvalidOperationException($"Failed to allocate Vulkan command buffer: code {cmdRes}");
-
-        _commandBuffer = cmdBufs[0];
+            Dispose();
+            throw;
+        }
     }
 
     public uint FindMemoryType(uint typeFilter, uint properties)

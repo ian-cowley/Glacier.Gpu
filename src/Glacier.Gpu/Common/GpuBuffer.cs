@@ -7,6 +7,8 @@ namespace Glacier.Gpu.Common;
 
 using System;
 using System.Runtime.CompilerServices;
+using System.Runtime.Versioning;
+using System.Threading;
 using Glacier.Gpu.Drivers;
 using Vortice.Direct3D12;
 
@@ -58,6 +60,9 @@ public sealed unsafe class GpuBuffer<T> : IDisposable where T : unmanaged
         Action<IntPtr>? freeAction = null,
         IDisposable? underlyingResource = null)
     {
+        if (elementCount < 0)
+            throw new ArgumentOutOfRangeException(nameof(elementCount), "Element count must be non-negative.");
+
         _devicePointer = devicePointer;
         _gpuVirtualAddress = gpuVirtualAddress;
         _elementCount = elementCount;
@@ -118,7 +123,7 @@ public sealed unsafe class GpuBuffer<T> : IDisposable where T : unmanaged
 
         EnsureCudaContext();
 
-        nuint bytes = (nuint)((ulong)elementCount * (ulong)sizeof(T));
+        nuint bytes = (nuint)(Math.Max(1UL, (ulong)elementCount * (ulong)sizeof(T)));
         int res = CuDriver.MemAlloc(out IntPtr dptr, bytes);
         if (res != 0 || dptr == IntPtr.Zero)
             throw new OutOfMemoryException($"Failed to allocate {bytes} bytes in CUDA VRAM. Error: {res}");
@@ -136,13 +141,15 @@ public sealed unsafe class GpuBuffer<T> : IDisposable where T : unmanaged
     /// <summary>
     /// Allocates device-resident VRAM on a Direct3D 12 device default heap (D3D12_HEAP_TYPE_DEFAULT).
     /// </summary>
+    [SupportedOSPlatform("windows")]
+    [MethodImpl(MethodImplOptions.NoInlining)]
     public static GpuBuffer<T> AllocateD3D12(ID3D12Device device, int elementCount, ResourceFlags flags = ResourceFlags.None)
     {
         ArgumentNullException.ThrowIfNull(device, nameof(device));
         if (elementCount < 0)
             throw new ArgumentOutOfRangeException(nameof(elementCount), "Element count must be non-negative.");
 
-        ulong bytes = (ulong)elementCount * (ulong)sizeof(T);
+        ulong bytes = Math.Max(4UL, (ulong)elementCount * (ulong)sizeof(T));
         var desc = ResourceDescription.Buffer(bytes, flags);
         var heapProps = new HeapProperties(HeapType.Default);
         var resource = device.CreateCommittedResource(heapProps, HeapFlags.None, desc, ResourceStates.Common);
@@ -164,6 +171,7 @@ public sealed unsafe class GpuBuffer<T> : IDisposable where T : unmanaged
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (hostSpan.Length != _elementCount)
             throw new ArgumentException($"Host span length ({hostSpan.Length}) does not match buffer element count ({_elementCount}).");
+        if (_elementCount == 0) return;
 
         fixed (T* pHost = hostSpan)
         {
@@ -203,6 +211,7 @@ public sealed unsafe class GpuBuffer<T> : IDisposable where T : unmanaged
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (hostSpan.Length != _elementCount)
             throw new ArgumentException($"Host span length ({hostSpan.Length}) does not match buffer element count ({_elementCount}).");
+        if (_elementCount == 0) return;
 
         fixed (T* pHost = hostSpan)
         {
@@ -244,6 +253,7 @@ public sealed unsafe class GpuBuffer<T> : IDisposable where T : unmanaged
         ObjectDisposedException.ThrowIf(source.IsDisposed, source);
         if (source.ElementCount != _elementCount)
             throw new ArgumentException($"Source element count ({source.ElementCount}) does not match destination element count ({_elementCount}).");
+        if (_elementCount == 0) return;
 
         if (_deviceType == GpuDeviceType.NvidiaDiscrete && source.DeviceType == GpuDeviceType.NvidiaDiscrete)
         {

@@ -313,21 +313,19 @@ sequenceDiagram
     rect rgb(18, 22, 31)
         Note over T1,Ring: Producer 1 verifies turn lease
         T1->>Ring: Read _slotSequences[Slot 0] == 0 (Valid Turn)
-        T1->>Ring: Invalidate TaskId: Volatile.Write(&task->TaskId, 0)
-        T1->>Ring: Write Parameters (OpCode, ElementCount, Buffers)
+        T1->>Ring: Write Parameters (OpCode, ElementCount, Buffers, Scalar)
+        T1->>Ring: Mark In-Flight: Volatile.Write(&task->Status, 0)
         T1->>Ring: Sse.StoreFence() / MemoryBarrier()
-        T1->>Ring: Publish TaskId: Volatile.Write(&task->TaskId, 1)
-        T1->>Ring: Sse.StoreFence()
-        T1->>Ring: Publish Status: Volatile.Write(&task->Status, 0)
+        T1->>Ring: Release-Publish Sequence ID: Volatile.Write(&task->TaskId, 1)
         T1->>Ring: Transfer Turn Lease: Volatile.Write(&_slotSequences[0], seq - 1 + Capacity)
     end
 
     rect rgb(11, 12, 16)
-        Note over Ring,GPU: GPU persistent polling loop
-        GPU->>Ring: Poll detects task[0]->Status == 0
-        GPU->>GPU: Read TaskId, OpCode, Buffers
-        GPU->>GPU: Dispatch 32 threads across SIMT execution units
-        GPU->>Ring: Write task[0]->Status = 1 (Completed)
+        Note over Ring,GPU: GPU persistent polling loop (CU_STREAM_NON_BLOCKING)
+        GPU->>Ring: ld.acquire.sys.global.u32 detects task[slot]->TaskId == expectedTaskId
+        GPU->>GPU: Broadcast OpCode, ElementCount, Buffers via shared memory
+        GPU->>GPU: Dispatch SIMT warps across grid-stride loop
+        GPU->>Ring: st.release.sys.global.u32 task[slot]->Status = 1 (Completed)
     end
 
     rect rgb(26, 34, 48)
