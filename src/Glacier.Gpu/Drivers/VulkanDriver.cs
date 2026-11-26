@@ -30,19 +30,43 @@ public static unsafe class VulkanDriver
     public const int VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO = 39;
     public const int VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO = 40;
     public const int VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO = 42;
+    public const int VK_STRUCTURE_TYPE_MEMORY_BARRIER = 46;
     public const int VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 = 1000059000;
+    public const int VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES = 1000280000;
+    public const int VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES_KHR = 1000280000;
     public const int VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR = 1000506000;
 
+    public const string VK_KHR_SHADER_INTEGER_DOT_PRODUCT_EXTENSION_NAME = "VK_KHR_shader_integer_dot_product";
+    public const string VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME = "VK_KHR_cooperative_matrix";
+
+    public const uint VK_PHYSICAL_DEVICE_TYPE_OTHER = 0;
+    public const uint VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU = 1;
+    public const uint VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU = 2;
+    public const uint VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU = 3;
+    public const uint VK_PHYSICAL_DEVICE_TYPE_CPU = 4;
+
     public const uint VK_QUEUE_COMPUTE_BIT = 0x00000002;
+    public const uint VK_BUFFER_USAGE_TRANSFER_SRC_BIT = 0x00000001;
+    public const uint VK_BUFFER_USAGE_TRANSFER_DST_BIT = 0x00000002;
     public const uint VK_BUFFER_USAGE_STORAGE_BUFFER_BIT = 0x00000020;
     public const uint VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT = 0x00000001;
     public const uint VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT = 0x00000002;
     public const uint VK_MEMORY_PROPERTY_HOST_COHERENT_BIT = 0x00000004;
+    public const uint VK_MEMORY_PROPERTY_DEVICE_UNCACHED_BIT_AMD = 0x00000080;
     public const uint VK_MEMORY_HEAP_DEVICE_LOCAL_BIT = 0x00000001;
     public const int VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO = 18;
     public const int VK_DESCRIPTOR_TYPE_STORAGE_BUFFER = 7;
     public const uint VK_SHADER_STAGE_COMPUTE_BIT = 0x00000020;
     public const int VK_PIPELINE_BIND_POINT_COMPUTE = 1;
+    public const uint VK_ACCESS_SHADER_READ_BIT = 0x00000020;
+    public const uint VK_ACCESS_SHADER_WRITE_BIT = 0x00000040;
+    public const uint VK_ACCESS_TRANSFER_READ_BIT = 0x00000800;
+    public const uint VK_ACCESS_TRANSFER_WRITE_BIT = 0x00001000;
+    public const uint VK_ACCESS_HOST_READ_BIT = 0x00002000;
+    public const uint VK_ACCESS_HOST_WRITE_BIT = 0x00004000;
+    public const uint VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT = 0x00000800;
+    public const uint VK_PIPELINE_STAGE_TRANSFER_BIT = 0x00001000;
+    public const uint VK_PIPELINE_STAGE_HOST_BIT = 0x00004000;
     public const uint VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT = 1;
     public const ulong VK_WHOLE_SIZE = ~0UL;
 
@@ -690,16 +714,129 @@ public static unsafe class VulkanDriver
         }
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    public struct VkBufferCopy
+    {
+        public ulong srcOffset;
+        public ulong dstOffset;
+        public ulong size;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct VkMemoryBarrier
+    {
+        public int sType;
+        public IntPtr pNext;
+        public uint srcAccessMask;
+        public uint dstAccessMask;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct VkExtensionProperties
+    {
+        public fixed byte extensionNameBytes[256];
+        public uint specVersion;
+
+        public string GetExtensionName()
+        {
+            fixed (byte* ptr = extensionNameBytes)
+            {
+                int len = 0;
+                while (len < 256 && ptr[len] != 0) len++;
+                return Encoding.UTF8.GetString(ptr, len);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Vulkan 1.1+ extensible physical device feature query root struct (<c>sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2</c>).
+    /// Contains the 55 <c>VkBool32</c> core 1.0 feature flags plus <c>pNext</c> chain pointer.
+    /// </summary>
+    [StructLayout(LayoutKind.Sequential)]
+    public struct VkPhysicalDeviceFeatures2
+    {
+        public int sType;
+        public IntPtr pNext;
+        public fixed uint features[55];
+    }
+
+    /// <summary>
+    /// Vulkan 1.3 core / <c>VK_KHR_shader_integer_dot_product</c> feature query &amp; enable struct
+    /// (<c>sType = 1000280000</c>).
+    /// </summary>
+    [StructLayout(LayoutKind.Sequential)]
+    public struct VkPhysicalDeviceShaderIntegerDotProductFeatures
+    {
+        public int sType;
+        public IntPtr pNext;
+        public uint shaderIntegerDotProduct;
+    }
+
+    /// <summary>
+    /// <c>VK_KHR_cooperative_matrix</c> feature query &amp; enable struct (<c>sType = 1000506000</c>).
+    /// </summary>
+    [StructLayout(LayoutKind.Sequential)]
+    public struct VkPhysicalDeviceCooperativeMatrixFeaturesKHR
+    {
+        public int sType;
+        public IntPtr pNext;
+        public uint cooperativeMatrix;
+        public uint cooperativeMatrixRobustBufferAccess;
+    }
+
+    [DllImport(VulkanLib, EntryPoint = "vkGetPhysicalDeviceFeatures2")]
+    public static extern void GetPhysicalDeviceFeatures2(IntPtr physicalDevice, ref VkPhysicalDeviceFeatures2 pFeatures);
+
+    [DllImport(VulkanLib, EntryPoint = "vkEnumerateDeviceExtensionProperties")]
+    public static extern int EnumerateDeviceExtensionProperties(IntPtr physicalDevice, IntPtr pLayerName, ref uint pPropertyCount, VkExtensionProperties* pProperties);
+
+    public static int EnumerateDeviceExtensionProperties(IntPtr physicalDevice, IntPtr pLayerName, ref uint pPropertyCount, VkExtensionProperties[]? pProperties)
+    {
+        if (pProperties == null)
+        {
+            return EnumerateDeviceExtensionProperties(physicalDevice, pLayerName, ref pPropertyCount, (VkExtensionProperties*)null);
+        }
+        fixed (VkExtensionProperties* pExt = pProperties)
+        {
+            return EnumerateDeviceExtensionProperties(physicalDevice, pLayerName, ref pPropertyCount, pExt);
+        }
+    }
+
     [DllImport(VulkanLib, EntryPoint = "vkCmdPushConstants")]
     public static extern void CmdPushConstants(IntPtr commandBuffer, IntPtr layout, uint stageFlags, uint offset, uint size, IntPtr pValues);
 
     [DllImport(VulkanLib, EntryPoint = "vkCmdDispatch")]
     public static extern void CmdDispatch(IntPtr commandBuffer, uint groupCountX, uint groupCountY, uint groupCountZ);
 
+    [DllImport(VulkanLib, EntryPoint = "vkCmdCopyBuffer")]
+    public static extern void CmdCopyBuffer(IntPtr commandBuffer, IntPtr srcBuffer, IntPtr dstBuffer, uint regionCount, VkBufferCopy* pRegions);
+
+    public static void CmdCopyBuffer(IntPtr commandBuffer, IntPtr srcBuffer, IntPtr dstBuffer, in VkBufferCopy region)
+    {
+        VkBufferCopy copy = region;
+        CmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, 1, &copy);
+    }
+
+    [DllImport(VulkanLib, EntryPoint = "vkCmdPipelineBarrier")]
+    public static extern void CmdPipelineBarrier(
+        IntPtr commandBuffer,
+        uint srcStageMask,
+        uint dstStageMask,
+        uint dependencyFlags,
+        uint memoryBarrierCount,
+        VkMemoryBarrier* pMemoryBarriers,
+        uint bufferMemoryBarrierCount,
+        IntPtr pBufferMemoryBarriers,
+        uint imageMemoryBarrierCount,
+        IntPtr pImageMemoryBarriers);
+
     [DllImport(VulkanLib, EntryPoint = "vkResetCommandBuffer")]
     public static extern int ResetCommandBuffer(IntPtr commandBuffer, uint flags);
 
     public static uint MakeVersion(uint major, uint minor, uint patch) => (major << 22) | (minor << 12) | patch;
+    public static uint VersionMajor(uint version) => version >> 22;
+    public static uint VersionMinor(uint version) => (version >> 12) & 0x3FF;
+    public static uint VersionPatch(uint version) => version & 0xFFF;
 
     public static void Check(int res, string op)
     {

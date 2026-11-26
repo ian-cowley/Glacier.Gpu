@@ -17,6 +17,17 @@ public static unsafe class CuDriver
     public const uint CU_MEMHOSTALLOC_WRITECOMBINED = 0x04;
     public const uint CU_STREAM_DEFAULT = 0x00;
     public const uint CU_STREAM_NON_BLOCKING = 0x01;
+    public const uint CU_EVENT_DEFAULT = 0x00;
+    public const uint CU_EVENT_DISABLE_TIMING = 0x02;
+
+    public const uint CU_STREAM_CAPTURE_MODE_GLOBAL = 0;
+    public const uint CU_STREAM_CAPTURE_MODE_THREAD_LOCAL = 1;
+    public const uint CU_STREAM_CAPTURE_MODE_RELAXED = 2;
+
+    public const ulong CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH = 0x01;
+    public const ulong CUDA_GRAPH_INSTANTIATE_FLAG_UPLOAD = 0x02;
+    public const ulong CUDA_GRAPH_INSTANTIATE_FLAG_DEVICE_LAUNCH = 0x04;
+    public const ulong CUDA_GRAPH_INSTANTIATE_FLAG_USE_NODE_PRIORITY = 0x08;
 
     static CuDriver()
     {
@@ -180,6 +191,49 @@ public static unsafe class CuDriver
 
     [DllImport(CudaLib, EntryPoint = "cuStreamDestroy_v2")]
     public static extern int StreamDestroy(IntPtr hStream);
+
+    [DllImport(CudaLib, EntryPoint = "cuModuleUnload")]
+    public static extern int ModuleUnload(IntPtr hmod);
+
+    [DllImport(CudaLib, EntryPoint = "cuEventCreate")]
+    public static extern int EventCreate(out IntPtr phEvent, uint flags);
+
+    [SuppressGCTransition]
+    [DllImport(CudaLib, EntryPoint = "cuEventRecord")]
+    public static extern int EventRecord(IntPtr hEvent, IntPtr hStream);
+
+    [DllImport(CudaLib, EntryPoint = "cuEventSynchronize")]
+    public static extern int EventSynchronize(IntPtr hEvent);
+
+    [SuppressGCTransition]
+    [DllImport(CudaLib, EntryPoint = "cuEventElapsedTime")]
+    public static extern int EventElapsedTime(out float pMilliseconds, IntPtr hStart, IntPtr hEnd);
+
+    [DllImport(CudaLib, EntryPoint = "cuEventDestroy_v2")]
+    public static extern int EventDestroy(IntPtr hEvent);
+
+    [SuppressGCTransition]
+    [DllImport(CudaLib, EntryPoint = "cuStreamWaitEvent")]
+    public static extern int StreamWaitEvent(IntPtr hStream, IntPtr hEvent, uint flags);
+
+    [DllImport(CudaLib, EntryPoint = "cuStreamBeginCapture_v2")]
+    public static extern int StreamBeginCapture(IntPtr hStream, uint mode);
+
+    [DllImport(CudaLib, EntryPoint = "cuStreamEndCapture")]
+    public static extern int StreamEndCapture(IntPtr hStream, out IntPtr phGraph);
+
+    [DllImport(CudaLib, EntryPoint = "cuGraphInstantiateWithFlags")]
+    public static extern int GraphInstantiateWithFlags(out IntPtr phGraphExec, IntPtr hGraph, ulong flags);
+
+    [SuppressGCTransition]
+    [DllImport(CudaLib, EntryPoint = "cuGraphLaunch")]
+    public static extern int GraphLaunch(IntPtr hGraphExec, IntPtr hStream);
+
+    [DllImport(CudaLib, EntryPoint = "cuGraphExecDestroy")]
+    public static extern int GraphExecDestroy(IntPtr hGraphExec);
+
+    [DllImport(CudaLib, EntryPoint = "cuGraphDestroy")]
+    public static extern int GraphDestroy(IntPtr hGraph);
 
     public static string GetDeviceName(int device)
     {

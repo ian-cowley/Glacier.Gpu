@@ -347,6 +347,37 @@ Console.WriteLine($"NVIDIA SASS FP32 Compute:{nvidiaTflops:F2} TFLOPS");
 Console.WriteLine($"AMD APU Memory Streaming:{amdBandwidth:F2} GB/s");
 ```
 
+### 7.2 Capturing Multi-Kernel CUDA Graphs (`CudaGraphExecutor`)
+
+Capture recurring CUDA chains once and replay them in a single `cuGraphLaunch` call:
+
+```csharp
+using var nvidia = new NvidiaSassEngine();
+nvidia.Initialize();
+using var graph = new CudaGraphExecutor(nvidia);
+
+graph.Execute(stream =>
+{
+    // Launch kernels or async copies on `stream` (or fork/join auxiliary streams with events).
+    // If capture is unsupported, CudaGraphExecutor falls back automatically to direct stream execution.
+}, synchronize: true);
+
+// Subsequent runs after in-place device buffer updates skip recording overhead:
+graph.Replay(synchronize: true);
+```
+
+### 7.3 Topology-Aware Vulkan 1.3 Staging (`VulkanEngine`)
+
+`VulkanEngine` enables Vulkan 1.3 (falling back to 1.2/1.1/1.0), detects `SupportsIntegerDotProduct` (`dp4a`), and automatically sets `PreferDeviceLocalStaging` when pure `DEVICE_LOCAL` VRAM exceeds twice the host-visible `DEVICE_LOCAL` BAR:
+
+```csharp
+using var vk = new VulkanEngine(deviceIndex: 0);
+vk.Initialize();
+
+Console.WriteLine($"dp4a={vk.SupportsIntegerDotProduct}, PreferStaging={vk.PreferDeviceLocalStaging}");
+using VulkanDeviceBuffer weights = vk.AllocateDeviceBuffer<float>(weightSpan);
+```
+
 ---
 
 ## 8. Advanced Performance Tuning & Best Practices

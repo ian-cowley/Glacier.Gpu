@@ -1,5 +1,6 @@
 using System;
 using BenchmarkDotNet.Attributes;
+using Glacier.Gpu.Compilation;
 using Glacier.Gpu.Drivers;
 using Glacier.Gpu.Engines;
 using Glacier.Gpu.RingBuffer;
@@ -7,10 +8,13 @@ using Glacier.Gpu.RingBuffer;
 namespace Glacier.Gpu.Benchmarks;
 
 [MemoryDiagnoser]
-public class DispatchBenchmarks : IDisposable
+public unsafe class DispatchBenchmarks : IDisposable
 {
     private NvidiaSassEngine? _engine;
     private PersistentRingBuffer? _ringBuffer;
+    private CudaGraphExecutor? _graphExecutor;
+    private IntPtr _module;
+    private IntPtr _fnAdd;
     private IntPtr _d_a;
     private IntPtr _d_b;
     private IntPtr _d_c;
@@ -23,6 +27,7 @@ public class DispatchBenchmarks : IDisposable
 
         _engine = new NvidiaSassEngine();
         _engine.Initialize();
+        CuDriver.Check(CuDriver.CtxSetCurrent(_engine.ContextHandle), "cuCtxSetCurrent");
 
         _ringBuffer = _engine.GetOrCreateRingBuffer();
 
@@ -30,6 +35,26 @@ public class DispatchBenchmarks : IDisposable
         CuDriver.Check(CuDriver.MemAlloc(out _d_a, bytes), "cuMemAlloc");
         CuDriver.Check(CuDriver.MemAlloc(out _d_b, bytes), "cuMemAlloc");
         CuDriver.Check(CuDriver.MemAlloc(out _d_c, bytes), "cuMemAlloc");
+
+        byte[] cubin = KernelCache.GetOrCompile(_engine.DeviceInfo.Architecture, "VectorAdd", KernelSources.VectorAddPtx);
+        CuDriver.Check(CuDriver.ModuleLoadData(out _module, cubin), "cuModuleLoadData");
+        CuDriver.Check(CuDriver.ModuleGetFunction(out _fnAdd, _module, "vector_add"), "cuModuleGetFunction");
+
+        _graphExecutor = new CudaGraphExecutor(_engine);
+        _graphExecutor.TryCapture(stream =>
+        {
+            void** pParams = stackalloc void*[4];
+            for (int k = 0; k < 16; k++)
+            {
+                IntPtr a = _d_a, b = _d_b, c = _d_c;
+                int n = N;
+                pParams[0] = &a;
+                pParams[1] = &b;
+                pParams[2] = &c;
+                pParams[3] = &n;
+                CuDriver.Check(CuDriver.LaunchKernel(_fnAdd, 1, 1, 1, 256, 1, 1, 0, stream, (IntPtr)pParams, IntPtr.Zero), "cuLaunchKernel");
+            }
+        });
     }
 
     [Benchmark(Baseline = true, Description = "Traditional cuLaunchKernel (Driver P/Invoke)")]
@@ -45,9 +70,25 @@ public class DispatchBenchmarks : IDisposable
         return _ringBuffer.Enqueue(TaskOpCode.VectorAdd, (uint)N, (ulong)_d_a, (ulong)_d_b, (ulong)_d_c);
     }
 
+    [Benchmark(Description = "CudaGraphExecutor 16-Kernel DAG Replay (Single cuGraphLaunch)")]
+    public long CudaGraphReplay()
+    {
+        if (_graphExecutor == null) return 0;
+        _graphExecutor.Replay(synchronize: true);
+        return _graphExecutor.ReplayCount;
+    }
+
     [GlobalCleanup]
     public void Cleanup()
     {
+        _graphExecutor?.Dispose();
+        _graphExecutor = null;
+        if (_module != IntPtr.Zero && _engine != null)
+        {
+            CuDriver.CtxSetCurrent(_engine.ContextHandle);
+            CuDriver.ModuleUnload(_module);
+            _module = IntPtr.Zero;
+        }
         _ringBuffer?.Dispose();
         _ringBuffer = null;
         if (_d_a != IntPtr.Zero) { CuDriver.MemFree(_d_a); _d_a = IntPtr.Zero; }

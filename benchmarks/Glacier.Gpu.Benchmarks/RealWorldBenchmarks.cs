@@ -6,6 +6,7 @@ using Vortice.Direct3D;
 using Vortice.Direct3D12;
 using Vortice.DXGI;
 using Glacier.Gpu.Common;
+using Glacier.Gpu.Compilation;
 using Glacier.Gpu.Drivers;
 using Glacier.Gpu.Engines;
 using Glacier.Gpu.Factory;
@@ -26,6 +27,8 @@ public static unsafe class RealWorldBenchmarks
         Benchmark1_LlmContextAndVramCeiling();
         Benchmark2_Wave32VsWave64OnAmd890M();
         Benchmark3_ZeroCopyVsPcieStagingLatency();
+        Benchmark4_CudaGraphReplayVsDirectLaunch();
+        Benchmark5_VulkanDeviceLocalStagingAndCapabilities();
     }
 
     /// <summary>
@@ -350,5 +353,166 @@ public static unsafe class RealWorldBenchmarks
         Console.WriteLine("    directly within shared system RAM.");
         Console.ResetColor();
         Console.WriteLine("================================================================================\n");
+    }
+
+    /// <summary>
+    /// Benchmark 4: Multi-Kernel CudaGraphExecutor Replay vs Direct Stream cuLaunchKernel Loop
+    /// </summary>
+    public static void Benchmark4_CudaGraphReplayVsDirectLaunch()
+    {
+        Console.ForegroundColor = ConsoleColor.Yellow;
+        Console.WriteLine("--------------------------------------------------------------------------------");
+        Console.WriteLine("BENCHMARK 4: CUDA Graph DAG Replay vs Direct cuLaunchKernel (16-Kernel Chain)");
+        Console.WriteLine("--------------------------------------------------------------------------------");
+        Console.ResetColor();
+
+        if (!CuDriver.IsAvailable())
+        {
+            Console.WriteLine("NVIDIA CUDA driver not available. Skipping.");
+            return;
+        }
+
+        using var engine = new NvidiaSassEngine();
+        engine.Initialize();
+        CuDriver.Check(CuDriver.CtxSetCurrent(engine.ContextHandle), "cuCtxSetCurrent");
+
+        byte[] cubin = KernelCache.GetOrCompile(engine.DeviceInfo.Architecture, "VectorAdd", KernelSources.VectorAddPtx);
+        CuDriver.Check(CuDriver.ModuleLoadData(out IntPtr module, cubin), "cuModuleLoadData");
+        CuDriver.Check(CuDriver.ModuleGetFunction(out IntPtr fnAdd, module, "vector_add"), "cuModuleGetFunction");
+
+        const int N = 4096;
+        const int chainLen = 16;
+        using var bufA = GpuBuffer<float>.AllocateCuda(N);
+        using var bufB = GpuBuffer<float>.AllocateCuda(N);
+        using var bufTmp = GpuBuffer<float>.AllocateCuda(N);
+        using var bufOut = GpuBuffer<float>.AllocateCuda(N);
+        using var executor = new CudaGraphExecutor(engine);
+
+        try
+        {
+            void RecordChain(IntPtr stream)
+            {
+                void** pParams = stackalloc void*[4];
+                for (int k = 0; k < chainLen; k++)
+                {
+                    IntPtr a = (k & 1) == 0 ? bufA.DevicePointer : bufTmp.DevicePointer;
+                    IntPtr b = bufB.DevicePointer;
+                    IntPtr c = (k == chainLen - 1) ? bufOut.DevicePointer : bufTmp.DevicePointer;
+                    int n = N;
+                    pParams[0] = &a;
+                    pParams[1] = &b;
+                    pParams[2] = &c;
+                    pParams[3] = &n;
+                    CuDriver.Check(CuDriver.LaunchKernel(fnAdd, (uint)((N + 255) / 256), 1, 1, 256, 1, 1, 0, stream, (IntPtr)pParams, IntPtr.Zero), "cuLaunchKernel");
+                }
+            }
+
+            // Warmup both direct stream and captured CUDA Graph
+            for (int w = 0; w < 50; w++)
+            {
+                RecordChain(executor.StreamHandle);
+                CuDriver.Check(CuDriver.StreamSynchronize(executor.StreamHandle), "cuStreamSynchronize");
+            }
+            executor.Execute(RecordChain, synchronize: true);
+            for (int w = 0; w < 50; w++)
+            {
+                executor.Replay(synchronize: true);
+            }
+
+            const int iters = 1000;
+            var swDirect = Stopwatch.StartNew();
+            for (int i = 0; i < iters; i++)
+            {
+                RecordChain(executor.StreamHandle);
+                CuDriver.Check(CuDriver.StreamSynchronize(executor.StreamHandle), "cuStreamSynchronize");
+            }
+            swDirect.Stop();
+
+            long allocBefore = GC.GetAllocatedBytesForCurrentThread();
+            var swGraph = Stopwatch.StartNew();
+            for (int i = 0; i < iters; i++)
+            {
+                executor.Replay(synchronize: true);
+            }
+            swGraph.Stop();
+            long allocGraph = GC.GetAllocatedBytesForCurrentThread() - allocBefore;
+
+            double directUs = swDirect.Elapsed.TotalMicroseconds / iters;
+            double graphUs = swGraph.Elapsed.TotalMicroseconds / iters;
+            Console.WriteLine($"  Device:                     {engine.DeviceInfo.DeviceName} ({engine.DeviceInfo.Architecture})");
+            Console.WriteLine($"  Direct 16-Kernel Launch:    {directUs:F2} \u00b5s/batch ({directUs / chainLen:F2} \u00b5s/kernel)");
+            Console.WriteLine($"  CudaGraphExecutor Replay:   {graphUs:F2} \u00b5s/batch (Allocated: {allocGraph} bytes)");
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine($"  CUDA Graph Speedup:         {directUs / graphUs:F2}x faster ({directUs - graphUs:F2} \u00b5s saved per batch)\n");
+            Console.ResetColor();
+        }
+        finally
+        {
+            CuDriver.CtxSetCurrent(engine.ContextHandle);
+            CuDriver.ModuleUnload(module);
+        }
+    }
+
+    /// <summary>
+    /// Benchmark 5: Vulkan 1.3 Capabilities & Topology-Aware Reusable 32 MB Staging Throughput
+    /// </summary>
+    public static void Benchmark5_VulkanDeviceLocalStagingAndCapabilities()
+    {
+        Console.ForegroundColor = ConsoleColor.Yellow;
+        Console.WriteLine("--------------------------------------------------------------------------------");
+        Console.WriteLine("BENCHMARK 5: Vulkan 1.3 Integer Dot Product & Reusable 32 MB Staging Throughput");
+        Console.WriteLine("--------------------------------------------------------------------------------");
+        Console.ResetColor();
+
+        if (!VulkanDriver.IsAvailable() || !VulkanContext.IsSupported)
+        {
+            Console.WriteLine("Vulkan runtime not available. Skipping.");
+            return;
+        }
+
+        var devices = VulkanContext.EnumerateDevices();
+        foreach (var dev in devices)
+        {
+            if (dev.DeviceType == VulkanDriver.VK_PHYSICAL_DEVICE_TYPE_CPU) continue;
+
+            using var engine = new VulkanEngine(dev.Ordinal);
+            engine.Initialize();
+            var ctx = engine.Context;
+            Console.WriteLine(
+                $"  [{dev.Ordinal}] {ctx.DeviceName} | API {VulkanDriver.VersionMajor(ctx.ApiVersion)}.{VulkanDriver.VersionMinor(ctx.ApiVersion)}.{VulkanDriver.VersionPatch(ctx.ApiVersion)} | " +
+                $"dp4a={ctx.SupportsIntegerDotProduct} | PreferStaging={ctx.PreferDeviceLocalStaging} | " +
+                $"DevLocalVRAM={ctx.MaxDeviceLocalHeapBytes / (1024 * 1024)} MB | HostVisBAR={ctx.MaxHostVisibleDeviceLocalHeapBytes / (1024 * 1024)} MB");
+
+            int[] sizesMb = [16, 36];
+            foreach (int mb in sizesMb)
+            {
+                int count = (mb * 1024 * 1024) / sizeof(float);
+                float[] hostSrc = new float[count];
+                float[] hostDst = new float[count];
+                hostSrc[0] = 1.5f;
+                hostSrc[^1] = 2.5f;
+
+                using var devBuf = engine.AllocateDeviceBuffer<float>(count);
+                // Warmup once
+                engine.UploadViaStaging<float>(devBuf.BufferHandle, hostSrc);
+                engine.DownloadViaStaging<float>(hostDst, devBuf.BufferHandle);
+
+                const int runs = 3;
+                var swUp = Stopwatch.StartNew();
+                for (int r = 0; r < runs; r++) engine.UploadViaStaging<float>(devBuf.BufferHandle, hostSrc);
+                swUp.Stop();
+
+                var swDown = Stopwatch.StartNew();
+                for (int r = 0; r < runs; r++) engine.DownloadViaStaging<float>(hostDst, devBuf.BufferHandle);
+                swDown.Stop();
+
+                double upMs = swUp.Elapsed.TotalMilliseconds / runs;
+                double downMs = swDown.Elapsed.TotalMilliseconds / runs;
+                double upGbs = (mb / 1024.0) / (upMs / 1000.0);
+                double downGbs = (mb / 1024.0) / (downMs / 1000.0);
+                Console.WriteLine($"      Staging {mb,2} MB (DevLocal={devBuf.IsDeviceLocal}, HostVis={devBuf.IsHostVisible}): Upload={upMs:F2} ms ({upGbs:F2} GB/s) | Download={downMs:F2} ms ({downGbs:F2} GB/s)");
+            }
+        }
+        Console.WriteLine();
     }
 }

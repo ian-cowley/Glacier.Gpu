@@ -448,6 +448,18 @@ flowchart LR
 - **Decision**: Enforce `Size = 64` on `GpuWorkTask` and stride slot sequences by 64 bytes (`CacheLineStride = 8`).
 - **Consequences**: Zero CPU core false sharing, sustaining 10.0M tasks/second across multi-threaded producers.
 
+### ADR-006: Reusable Multi-Stream `CudaGraphExecutor`
+- **Status**: Accepted
+- **Context**: Deep transformer decode graphs launch dozens to hundreds of short kernels per token. Under Windows WDDM and Linux CUDA, individual `cuLaunchKernel` calls cost ~13.9 &mu;s each on RTX 4060 Laptop (`222.43 &mu;s` for a 16-kernel chain).
+- **Decision**: Add `CudaGraphExecutor` capturing single-stream or fork/join multi-stream sequences on non-blocking streams via `cuStreamBeginCapture_v2`, replaying via `cuGraphLaunch`, and falling back automatically to direct stream execution if capture fails.
+- **Consequences**: Reduces the 16-kernel RTX 4060 chain from `222.43 &mu;s` to `34.49 &mu;s` (**6.45&times; faster**, 40 bytes managed allocation during the timed loop). Requires static device addresses or device-resident scalars (`d_pos`) between replays.
+
+### ADR-007: Vulkan 1.3 Integer Dot Product & Topology-Aware `DEVICE_LOCAL` Staging
+- **Status**: Accepted
+- **Context**: Discrete GPUs with a 256 MB BAR (or virtualized adapters exposing 0 MB host-visible VRAM) slow down on host-mapped `GTT`/system-RAM buffers, whereas unified-memory APUs (Radeon 890M) waste memory bandwidth on staging copies. Meanwhile, quantized kernels benefit from hardware `VK_KHR_shader_integer_dot_product` (`dotPacked4x8EXT`).
+- **Decision**: Probe Vulkan 1.3 core / extension capabilities (`SupportsIntegerDotProduct`, `HasCooperativeMatrix`) and heap sizes (`MaxDeviceLocalHeapBytes > 2 * MaxHostVisibleDeviceLocalHeapBytes` sets `PreferDeviceLocalStaging`). Allocate pure `DEVICE_LOCAL` buffers via a reusable 32 MB `vkCmdCopyBuffer` staging path on non-BAR discrete targets (`7.05 GB/s` 16 MB, `7.45 GB/s` 36 MB multi-chunk on D3D12-backed RTX 4060), while keeping unified-memory APUs zero-stage (`15.73 GB/s` 36 MB on Radeon 890M).
+- **Consequences**: Readback from pure `DEVICE_LOCAL` via staging remains slow (`0.13 GB/s` measured) because each synchronous round-trip stalls on a fence; use staging for one-time weight uploads and read back only small logit or score slices.
+
 ---
 
 ## 10. Quality Requirements & Verification Scenarios

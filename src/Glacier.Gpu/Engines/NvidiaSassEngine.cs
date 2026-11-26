@@ -54,6 +54,9 @@ public sealed unsafe class NvidiaSassEngine : IGpuEngine
         string arch = CuDriver.GetComputeCapability(dev);
         int smCount = CuDriver.GetMultiprocessorCount(dev);
         CuDriver.Check(CuDriver.DeviceTotalMem(out nuint totalMem, dev), "cuDeviceTotalMem");
+        CuDriver.DeviceGetAttribute(out int ccMajor, 75, dev);
+        CuDriver.DeviceGetAttribute(out int ccMinor, 76, dev);
+        bool supportsDp4a = ccMajor > 6 || (ccMajor == 6 && ccMinor >= 1);
 
         _deviceInfo = new GpuDeviceInfo(
             DeviceName: devName,
@@ -62,7 +65,9 @@ public sealed unsafe class NvidiaSassEngine : IGpuEngine
             ComputeUnitsOrSms: smCount,
             TotalMemoryBytes: (long)totalMem,
             IsUnifiedMemory: false,
-            SupportsPersistentRingBuffer: true
+            SupportsPersistentRingBuffer: true,
+            SupportsIntegerDotProduct: supportsDp4a,
+            PreferDeviceLocalStaging: true
         );
 
         CuDriver.Check(CuDriver.CtxCreate(out _ctx, 0, dev), "cuCtxCreate");

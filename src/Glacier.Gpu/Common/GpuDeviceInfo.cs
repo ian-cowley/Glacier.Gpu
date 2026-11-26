@@ -10,5 +10,7 @@ public record GpuDeviceInfo(
     int ComputeUnitsOrSms,
     long TotalMemoryBytes,
     bool IsUnifiedMemory,
-    bool SupportsPersistentRingBuffer
+    bool SupportsPersistentRingBuffer,
+    bool SupportsIntegerDotProduct = false,
+    bool PreferDeviceLocalStaging = false
 );

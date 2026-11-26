@@ -137,6 +137,8 @@ All metrics reflect physical hardware execution on an **ASUS TUF Gaming A14 (FA6
 | **RTX 4060 SASS FP32 Compute** | Baseline Runtime API | **13.64 TFLOPS** | **Hardware Compute Saturation** |
 | **AMD 890M Memory Sharing Latency** | PCIe Staging Buffer (~15 &mu;s) | **0.300 &mu;s (300 ns)** | **50&times; Lower Sharing Latency** |
 | **AMD APU Unified Memory Bandwidth**| Host-to-Device Copy (~8 GB/s) | **34.09 GB/s** | **4.2&times; Higher Memory Bandwidth** |
+| **CUDA Graph 16-Kernel DAG Replay** | 222.43 &mu;s (`cuLaunchKernel` &times; 16) | **34.49 &mu;s (`CudaGraphExecutor`)** | **6.45&times; Faster Batch Dispatch** (RTX 4060 Laptop) |
+| **Vulkan `DEVICE_LOCAL` 36 MB Upload**| Host-visible GTT/BAR streaming | **7.45 GB/s (`4.72 ms`)** | **Reusable 32 MB Multi-Chunk Staging** (`vkCmdCopyBuffer`) |
 | **Dual-GPU Concurrent Execution** | Sequential Dispatch (350 ms) | **123.28 ms** | **2.8&times; Parallel Workload Overlap** |
 | **Wavefront Execution Tuning** | Wave64 Divergence Stalls | **Wave32 Dual-Issue (RDNA)** | **+33.8% Kernel Throughput Boost** |
 | **LLM KV-Cache VRAM (8B at 32K)** | 8.00 GB FP32 (Crashes OOM) | **2.00 GB (Native FP8)** | **75% VRAM Reduction (4&times; Context Window)** |
@@ -266,6 +268,8 @@ For in-depth architectural specifications and comprehensive operational recipes,
 | `AmdRdnaEngine` | `Glacier.Gpu.Engines` | Manages zero-copy unified system memory access on AMD APUs via `amdhip64.dll`. |
 | `D3D12ComputeEngine` | `Glacier.Gpu.Engines` | Drives compute queues on Windows display adapters with HLSL Wave32 compute shaders. |
 | `HeterogeneousEngine`| `Glacier.Gpu.Engines` | Coordinates simultaneous parallel co-execution across discrete and integrated GPUs. |
+| `CudaGraphExecutor` | `Glacier.Gpu.Engines` | Captures and replays single- or multi-stream CUDA DAGs via `cuGraphLaunch`, with automatic direct fallback. |
+| `VulkanContext` / `VulkanDeviceBuffer` | `Glacier.Gpu.Engines` | Vulkan 1.3 engine probing `SupportsIntegerDotProduct` and `PreferDeviceLocalStaging` (32 MB staging copy). |
 | `PersistentRingBuffer` | `Glacier.Gpu.RingBuffer` | Lock-free bounded multi-slot circular ring buffer for persistent GPU workers. |
 | `GpuWorkTask` | `Glacier.Gpu.RingBuffer` | 64-byte cacheline aligned task descriptor struct exchanged between CPU and GPU. |
 | `UnifiedMemoryBlock<T>`| `Glacier.Gpu.Common` | Unmanaged pinned memory container exposing host pointers, device pointers, and `Span<T>`. |

@@ -12,7 +12,7 @@
 
     <!-- NuGet Package Properties -->
     <PackageId>Glacier.Gpu</PackageId>
-    <Version>1.1.0</Version>
+    <Version>1.2.0</Version>
     <Authors>Ian Cowley</Authors>
     <Company>Glacier High-Performance Ecosystem</Company>
     <Description>Heterogeneous Bare-Metal GPU Compute Engine in C# .NET 10 with Glacier.Compute foundational integration. Bypasses CUDA runtime to execute raw SASS machine code, multi-slot persistent ring buffer megakernels on non-blocking streams, Direct3D 12 compute shaders, Vulkan compute, and AMD RDNA zero-copy APU unified memory.</Description>
