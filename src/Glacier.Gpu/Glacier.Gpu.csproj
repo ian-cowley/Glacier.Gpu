@@ -12,7 +12,8 @@
 
     <!-- NuGet Package Properties -->
     <PackageId>Glacier.Gpu</PackageId>
-    <Version>1.2.0</Version>
+    <Version>1.2.1</Version>
+    <PackageReleaseNotes>v1.2.1: Updated Glacier.Compute 1.1.1 dependency and GPU driver reliability hardening.</PackageReleaseNotes>
     <Authors>Ian Cowley</Authors>
     <Company>Glacier High-Performance Ecosystem</Company>
     <Description>Heterogeneous Bare-Metal GPU Compute Engine in C# .NET 10 with Glacier.Compute foundational integration. Bypasses CUDA runtime to execute raw SASS machine code, multi-slot persistent ring buffer megakernels on non-blocking streams, Direct3D 12 compute shaders, Vulkan compute, and AMD RDNA zero-copy APU unified memory.</Description>
@@ -29,7 +30,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Glacier.Compute" Version="1.1.0" />
+    <PackageReference Include="Glacier.Compute" Version="1.1.1" />
     <PackageReference Include="Vortice.D3DCompiler" Version="3.8.3" />
     <PackageReference Include="Vortice.Direct3D12" Version="3.8.3" />
   </ItemGroup>

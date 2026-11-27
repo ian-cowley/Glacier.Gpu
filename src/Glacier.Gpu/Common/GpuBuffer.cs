@@ -26,7 +26,7 @@ public sealed unsafe class GpuBuffer<T> : IDisposable where T : unmanaged
     private readonly GpuDeviceType _deviceType;
     private readonly Action<IntPtr>? _freeAction;
     private readonly IDisposable? _underlyingResource;
-    private bool _disposed;
+    private int _disposed;
 
     /// <summary>Gets the raw device pointer (CUdeviceptr for CUDA, native handle for Vulkan).</summary>
     public IntPtr DevicePointer => _devicePointer;
@@ -47,7 +47,7 @@ public sealed unsafe class GpuBuffer<T> : IDisposable where T : unmanaged
     public object? UnderlyingResource => _underlyingResource;
 
     /// <summary>Gets a value indicating whether this buffer has been disposed.</summary>
-    public bool IsDisposed => _disposed;
+    public bool IsDisposed => Volatile.Read(ref _disposed) != 0;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="GpuBuffer{T}"/> class.
@@ -168,7 +168,7 @@ public sealed unsafe class GpuBuffer<T> : IDisposable where T : unmanaged
     /// </summary>
     public void CopyFromHost(ReadOnlySpan<T> hostSpan, IntPtr stream = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         if (hostSpan.Length != _elementCount)
             throw new ArgumentException($"Host span length ({hostSpan.Length}) does not match buffer element count ({_elementCount}).");
         if (_elementCount == 0) return;
@@ -208,7 +208,7 @@ public sealed unsafe class GpuBuffer<T> : IDisposable where T : unmanaged
     /// </summary>
     public void CopyToHost(Span<T> hostSpan, IntPtr stream = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         if (hostSpan.Length != _elementCount)
             throw new ArgumentException($"Host span length ({hostSpan.Length}) does not match buffer element count ({_elementCount}).");
         if (_elementCount == 0) return;
@@ -248,7 +248,7 @@ public sealed unsafe class GpuBuffer<T> : IDisposable where T : unmanaged
     /// </summary>
     public void CopyFromDevice(GpuBuffer<T> source, IntPtr stream = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         ArgumentNullException.ThrowIfNull(source, nameof(source));
         ObjectDisposedException.ThrowIf(source.IsDisposed, source);
         if (source.ElementCount != _elementCount)
@@ -285,10 +285,9 @@ public sealed unsafe class GpuBuffer<T> : IDisposable where T : unmanaged
     /// <inheritdoc/>
     public void Dispose()
     {
-        if (!_disposed)
+        if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
-            _disposed = true;
-            if (_devicePointer != IntPtr.Zero && _freeAction != null)
+            if (_freeAction != null && (_devicePointer != IntPtr.Zero || _underlyingResource == null))
             {
                 _freeAction(_devicePointer);
                 _devicePointer = IntPtr.Zero;

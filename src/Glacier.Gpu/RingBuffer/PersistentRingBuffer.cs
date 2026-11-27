@@ -66,70 +66,60 @@ public sealed unsafe class PersistentRingBuffer : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        long seq = Interlocked.Increment(ref _sequenceCounter);
-        uint id = (uint)seq;
-        int slot = (int)((seq - 1) & _mask);
-        int slotIndex = slot * CacheLineStride;
-        GpuWorkTask* task = &_tasks[slot];
+        // Poison-free CAS reservation: verify slot turn readiness and completion BEFORE advancing _sequenceCounter
+        var spinner = new SpinWait();
+        long startTicks = Stopwatch.GetTimestamp();
+        long prevSeq;
+        long seq;
+        int slot;
+        int slotIndex;
+        GpuWorkTask* task;
 
-        // 1. Wait until this producer acquires the sequence turn lease for this slot
-        long expectedTurn = seq - 1;
-        if (Volatile.Read(ref _slotSequences[slotIndex]) != expectedTurn)
+        while (true)
         {
-            var turnSpinner = new SpinWait();
-            long turnStart = Stopwatch.GetTimestamp();
-            while (Volatile.Read(ref _slotSequences[slotIndex]) != expectedTurn)
-            {
-                turnSpinner.SpinOnce();
-                if (Stopwatch.GetElapsedTime(turnStart).TotalMilliseconds > timeoutMs)
-                    throw new TimeoutException($"Persistent ring buffer saturated: slot {slot} turn wait exceeded {timeoutMs}ms.");
-            }
-        }
+            prevSeq = Volatile.Read(ref _sequenceCounter);
+            seq = prevSeq + 1;
+            slot = (int)((seq - 1) & _mask);
+            slotIndex = slot * CacheLineStride;
+            task = &_tasks[slot];
 
-        bool published = false;
-        try
-        {
-            // 2. Ensure consumer has completed the previous task in this circular slot
-            if (seq > _capacity && Volatile.Read(ref task->Status) != 1)
+            if (Volatile.Read(ref _slotSequences[slotIndex]) == prevSeq &&
+                (seq <= _capacity || Volatile.Read(ref task->Status) == 1))
             {
-                var slotSpinner = new SpinWait();
-                long slotStart = Stopwatch.GetTimestamp();
-                while (Volatile.Read(ref task->Status) != 1)
+                if (Interlocked.CompareExchange(ref _sequenceCounter, seq, prevSeq) == prevSeq)
                 {
-                    slotSpinner.SpinOnce();
-                    if (Stopwatch.GetElapsedTime(slotStart).TotalMilliseconds > timeoutMs)
-                        throw new TimeoutException($"Persistent ring buffer saturated: slot {slot} was not freed within {timeoutMs}ms.");
+                    break;
                 }
             }
-
-            task->OpCode = (uint)opCode;
-            task->ElementCount = elementCount;
-            task->BufferA = bufA;
-            task->BufferB = bufB;
-            task->BufferC = bufC;
-            task->Scalar = scalar;
-            Volatile.Write(ref task->Status, 0); // Mark slot in-flight BEFORE publishing TaskId
-
-            if (System.Runtime.Intrinsics.X86.Sse.IsSupported)
-                System.Runtime.Intrinsics.X86.Sse.StoreFence();
             else
-                Thread.MemoryBarrier();
-
-            Volatile.Write(ref task->TaskId, id); // Release-publish monotonic sequence ID to GPU consumer
-
-            // 3. Publish slot turn lease to next generation producer for this slot
-            Volatile.Write(ref _slotSequences[slotIndex], seq - 1 + _capacity);
-            published = true;
-            return id;
-        }
-        finally
-        {
-            if (!published)
             {
-                // Advance turn on timeout/abort so subsequent producers are not deadlocked
-                Volatile.Write(ref _slotSequences[slotIndex], seq - 1 + _capacity);
+                spinner.SpinOnce();
+                if (Stopwatch.GetElapsedTime(startTicks).TotalMilliseconds > timeoutMs)
+                {
+                    throw new TimeoutException($"Persistent ring buffer saturated: slot {slot} was not freed within {timeoutMs}ms.");
+                }
             }
         }
+
+        uint id = (uint)seq;
+        task->OpCode = (uint)opCode;
+        task->ElementCount = elementCount;
+        task->BufferA = bufA;
+        task->BufferB = bufB;
+        task->BufferC = bufC;
+        task->Scalar = scalar;
+        Volatile.Write(ref task->Status, 0); // Mark slot in-flight BEFORE publishing TaskId
+
+        if (System.Runtime.Intrinsics.X86.Sse.IsSupported)
+            System.Runtime.Intrinsics.X86.Sse.StoreFence();
+        else
+            Thread.MemoryBarrier();
+
+        Volatile.Write(ref task->TaskId, id); // Release-publish monotonic sequence ID to GPU consumer
+
+        // Publish slot turn lease to next generation producer for this slot
+        Volatile.Write(ref _slotSequences[slotIndex], prevSeq + _capacity);
+        return id;
     }
 
     /// <summary>

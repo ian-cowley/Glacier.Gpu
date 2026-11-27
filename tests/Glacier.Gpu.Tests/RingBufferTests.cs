@@ -225,4 +225,37 @@ public class RingBufferTests
             Marshal.FreeHGlobal(hostMem);
         }
     }
+
+    [Fact]
+    public unsafe void PersistentRingBuffer_EnqueueTimeout_DoesNotPoisonSubsequentSequence()
+    {
+        const int capacity = 2;
+        int bufferBytes = capacity * sizeof(GpuWorkTask);
+        IntPtr hostMem = Marshal.AllocHGlobal(bufferBytes);
+
+        try
+        {
+            using var ring = new PersistentRingBuffer(hostMem, hostMem, capacity, disposeAction: () => { });
+
+            uint id1 = ring.Enqueue(TaskOpCode.VectorAdd, 1, 0, 0, 0, timeoutMs: 500);
+            uint id2 = ring.Enqueue(TaskOpCode.VectorAdd, 2, 0, 0, 0, timeoutMs: 500);
+            Assert.Equal(1u, id1);
+            Assert.Equal(2u, id2);
+
+            // Ring is full; enqueue must timeout WITHOUT consuming sequence 3 or poisoning slot 0
+            Assert.Throws<TimeoutException>(() => ring.Enqueue(TaskOpCode.VectorAdd, 3, 0, 0, 0, timeoutMs: 25));
+
+            // Consumer completes slot 0 (task 1)
+            GpuWorkTask* tasks = (GpuWorkTask*)hostMem;
+            Volatile.Write(ref tasks[0].Status, 1);
+
+            // Next enqueue must receive contiguous TaskId == 3 (no gap!)
+            uint id3 = ring.Enqueue(TaskOpCode.VectorAdd, 3, 0, 0, 0, timeoutMs: 500);
+            Assert.Equal(3u, id3);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(hostMem);
+        }
+    }
 }
