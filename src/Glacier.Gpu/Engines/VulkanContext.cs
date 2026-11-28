@@ -108,6 +108,7 @@ public sealed unsafe class VulkanContext : IDisposable
     public const ulong DefaultMinStagingBytes = 4UL * 1024UL * 1024UL;
 
     private readonly Lock _stagingLock = new();
+    private readonly Lock _queueLock = new();
     private IntPtr _instance;
     private IntPtr _physicalDevice;
     private IntPtr _device;
@@ -115,6 +116,8 @@ public sealed unsafe class VulkanContext : IDisposable
     private uint _computeQueueIndex;
     private IntPtr _commandPool;
     private IntPtr _commandBuffer;
+    private IntPtr _queueFence;
+    private bool _fenceInFlight;
     private IntPtr _stagingBuffer;
     private IntPtr _stagingMemory;
     private ulong _stagingSize;
@@ -154,7 +157,9 @@ public sealed unsafe class VulkanContext : IDisposable
     public IntPtr QueueHandle => _computeQueue;
     public IntPtr CommandPoolHandle => _commandPool;
     public IntPtr CommandBufferHandle => _commandBuffer;
+    public IntPtr QueueFenceHandle => _queueFence;
     public uint ComputeQueueIndex => _computeQueueIndex;
+    internal bool IsDisposed => _disposed;
 
     private static bool TryCreateInstanceWithFallback(string appName, out IntPtr instance, out uint apiVersion)
     {
@@ -537,6 +542,16 @@ public sealed unsafe class VulkanContext : IDisposable
                 throw new InvalidOperationException($"Failed to allocate Vulkan command buffer: code {cmdRes}");
 
             _commandBuffer = cmdBufs[0];
+
+            // 7. Create Reusable Queue Synchronization Fence
+            var fenceInfo = new VulkanDriver.VkFenceCreateInfo
+            {
+                sType = VulkanDriver.VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+                flags = 0
+            };
+            int fenceRes = VulkanDriver.CreateFence(_device, ref fenceInfo, IntPtr.Zero, out _queueFence);
+            if (fenceRes != VulkanDriver.VK_SUCCESS || _queueFence == IntPtr.Zero)
+                throw new InvalidOperationException($"Failed to create Vulkan queue fence: code {fenceRes}");
         }
         catch
         {
@@ -891,31 +906,26 @@ public sealed unsafe class VulkanContext : IDisposable
                 ulong chunk = Math.Min(remaining, _stagingSize);
                 CopyToBuffer(_stagingMemory, (IntPtr)(srcPtr + offset), chunk);
 
-                VulkanDriver.Check(VulkanDriver.ResetCommandBuffer(cb, 0), "vkResetCommandBuffer(staging upload)");
-                var begin = new VulkanDriver.VkCommandBufferBeginInfo
+                lock (_queueLock)
                 {
-                    sType = VulkanDriver.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
-                };
-                VulkanDriver.Check(VulkanDriver.BeginCommandBuffer(cb, ref begin), "vkBeginCommandBuffer(staging upload)");
+                    VulkanDriver.Check(VulkanDriver.ResetCommandBuffer(cb, 0), "vkResetCommandBuffer(staging upload)");
+                    var begin = new VulkanDriver.VkCommandBufferBeginInfo
+                    {
+                        sType = VulkanDriver.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
+                    };
+                    VulkanDriver.Check(VulkanDriver.BeginCommandBuffer(cb, ref begin), "vkBeginCommandBuffer(staging upload)");
 
-                var copy = new VulkanDriver.VkBufferCopy
-                {
-                    srcOffset = 0,
-                    dstOffset = dstOffset + offset,
-                    size = chunk
-                };
-                VulkanDriver.CmdCopyBuffer(cb, _stagingBuffer, dstBuffer, 1, &copy);
+                    var copy = new VulkanDriver.VkBufferCopy
+                    {
+                        srcOffset = 0,
+                        dstOffset = dstOffset + offset,
+                        size = chunk
+                    };
+                    VulkanDriver.CmdCopyBuffer(cb, _stagingBuffer, dstBuffer, 1, &copy);
 
-                VulkanDriver.Check(VulkanDriver.EndCommandBuffer(cb), "vkEndCommandBuffer(staging upload)");
-
-                var submit = new VulkanDriver.VkSubmitInfo
-                {
-                    sType = VulkanDriver.VK_STRUCTURE_TYPE_SUBMIT_INFO,
-                    commandBufferCount = 1,
-                    pCommandBuffers = new IntPtr(&cb)
-                };
-                VulkanDriver.Check(VulkanDriver.QueueSubmit(_computeQueue, 1, ref submit, IntPtr.Zero), "vkQueueSubmit(staging upload)");
-                Synchronize();
+                    VulkanDriver.Check(VulkanDriver.EndCommandBuffer(cb), "vkEndCommandBuffer(staging upload)");
+                    SubmitAndWaitQueueLocked(cb, "staging upload");
+                }
 
                 offset += chunk;
                 remaining -= chunk;
@@ -960,31 +970,26 @@ public sealed unsafe class VulkanContext : IDisposable
             {
                 ulong chunk = Math.Min(remaining, _stagingSize);
 
-                VulkanDriver.Check(VulkanDriver.ResetCommandBuffer(cb, 0), "vkResetCommandBuffer(staging download)");
-                var begin = new VulkanDriver.VkCommandBufferBeginInfo
+                lock (_queueLock)
                 {
-                    sType = VulkanDriver.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
-                };
-                VulkanDriver.Check(VulkanDriver.BeginCommandBuffer(cb, ref begin), "vkBeginCommandBuffer(staging download)");
+                    VulkanDriver.Check(VulkanDriver.ResetCommandBuffer(cb, 0), "vkResetCommandBuffer(staging download)");
+                    var begin = new VulkanDriver.VkCommandBufferBeginInfo
+                    {
+                        sType = VulkanDriver.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
+                    };
+                    VulkanDriver.Check(VulkanDriver.BeginCommandBuffer(cb, ref begin), "vkBeginCommandBuffer(staging download)");
 
-                var copy = new VulkanDriver.VkBufferCopy
-                {
-                    srcOffset = srcOffset + offset,
-                    dstOffset = 0,
-                    size = chunk
-                };
-                VulkanDriver.CmdCopyBuffer(cb, srcBuffer, _stagingBuffer, 1, &copy);
+                    var copy = new VulkanDriver.VkBufferCopy
+                    {
+                        srcOffset = srcOffset + offset,
+                        dstOffset = 0,
+                        size = chunk
+                    };
+                    VulkanDriver.CmdCopyBuffer(cb, srcBuffer, _stagingBuffer, 1, &copy);
 
-                VulkanDriver.Check(VulkanDriver.EndCommandBuffer(cb), "vkEndCommandBuffer(staging download)");
-
-                var submit = new VulkanDriver.VkSubmitInfo
-                {
-                    sType = VulkanDriver.VK_STRUCTURE_TYPE_SUBMIT_INFO,
-                    commandBufferCount = 1,
-                    pCommandBuffers = new IntPtr(&cb)
-                };
-                VulkanDriver.Check(VulkanDriver.QueueSubmit(_computeQueue, 1, ref submit, IntPtr.Zero), "vkQueueSubmit(staging download)");
-                Synchronize();
+                    VulkanDriver.Check(VulkanDriver.EndCommandBuffer(cb), "vkEndCommandBuffer(staging download)");
+                    SubmitAndWaitQueueLocked(cb, "staging download");
+                }
 
                 CopyFromBuffer((IntPtr)(dstPtr + offset), _stagingMemory, chunk);
 
@@ -1101,11 +1106,101 @@ public sealed unsafe class VulkanContext : IDisposable
         VulkanDriver.UnmapMemory(_device, memory);
     }
 
+    /// <summary>
+    /// Submits a recorded command buffer to the compute queue with <see cref="QueueFenceHandle"/> and waits on the fence.
+    /// </summary>
+    public void SubmitAndWait(IntPtr commandBuffer)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (commandBuffer == IntPtr.Zero)
+            throw new ArgumentException("Command buffer handle cannot be zero.", nameof(commandBuffer));
+
+        lock (_queueLock)
+        {
+            SubmitAndWaitQueueLocked(commandBuffer, "submit");
+        }
+    }
+
+    internal void RecordAndSubmitCompute(Action<IntPtr> recordCommands, string operationName = "compute")
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(recordCommands);
+
+        lock (_queueLock)
+        {
+            IntPtr cb = _commandBuffer;
+            VulkanDriver.Check(VulkanDriver.ResetCommandBuffer(cb, 0), $"vkResetCommandBuffer({operationName})");
+            var begin = new VulkanDriver.VkCommandBufferBeginInfo
+            {
+                sType = VulkanDriver.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
+            };
+            VulkanDriver.Check(VulkanDriver.BeginCommandBuffer(cb, ref begin), $"vkBeginCommandBuffer({operationName})");
+
+            recordCommands(cb);
+
+            VulkanDriver.Check(VulkanDriver.EndCommandBuffer(cb), $"vkEndCommandBuffer({operationName})");
+            SubmitAndWaitQueueLocked(cb, operationName);
+        }
+    }
+
+    private void SubmitAndWaitQueueLocked(IntPtr commandBuffer, string operationName)
+    {
+        if (_fenceInFlight && _queueFence != IntPtr.Zero)
+        {
+            VulkanDriver.Check(
+                VulkanDriver.WaitForFences(_device, 1, ref _queueFence, VulkanDriver.VK_TRUE, ulong.MaxValue),
+                "vkWaitForFences(pending)");
+            VulkanDriver.Check(VulkanDriver.ResetFences(_device, 1, ref _queueFence), "vkResetFences(pending)");
+            _fenceInFlight = false;
+        }
+
+        VulkanDriver.Check(VulkanDriver.ResetFences(_device, 1, ref _queueFence), $"vkResetFences({operationName})");
+        var submit = new VulkanDriver.VkSubmitInfo
+        {
+            sType = VulkanDriver.VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            commandBufferCount = 1,
+            pCommandBuffers = new IntPtr(&commandBuffer)
+        };
+
+        _fenceInFlight = true;
+        try
+        {
+            VulkanDriver.Check(VulkanDriver.QueueSubmit(_computeQueue, 1, ref submit, _queueFence), $"vkQueueSubmit({operationName})");
+            VulkanDriver.Check(
+                VulkanDriver.WaitForFences(_device, 1, ref _queueFence, VulkanDriver.VK_TRUE, ulong.MaxValue),
+                $"vkWaitForFences({operationName})");
+            VulkanDriver.Check(VulkanDriver.ResetFences(_device, 1, ref _queueFence), $"vkResetFences({operationName})");
+        }
+        finally
+        {
+            _fenceInFlight = false;
+        }
+    }
+
     public void Synchronize()
     {
-        if (_device != IntPtr.Zero)
+        lock (_queueLock)
         {
-            VulkanDriver.DeviceWaitIdle(_device);
+            if (_device == IntPtr.Zero) return;
+
+            if (_fenceInFlight && _queueFence != IntPtr.Zero)
+            {
+                try
+                {
+                    VulkanDriver.Check(
+                        VulkanDriver.WaitForFences(_device, 1, ref _queueFence, VulkanDriver.VK_TRUE, ulong.MaxValue),
+                        "vkWaitForFences(synchronize)");
+                    VulkanDriver.Check(VulkanDriver.ResetFences(_device, 1, ref _queueFence), "vkResetFences(synchronize)");
+                }
+                finally
+                {
+                    _fenceInFlight = false;
+                }
+            }
+            else if (_computeQueue != IntPtr.Zero)
+            {
+                VulkanDriver.Check(VulkanDriver.QueueWaitIdle(_computeQueue), "vkQueueWaitIdle");
+            }
         }
     }
 
@@ -1117,6 +1212,11 @@ public sealed unsafe class VulkanContext : IDisposable
             {
                 VulkanDriver.DeviceWaitIdle(_device);
                 ReleaseStagingBuffer();
+                if (_queueFence != IntPtr.Zero)
+                {
+                    VulkanDriver.DestroyFence(_device, _queueFence, IntPtr.Zero);
+                    _queueFence = IntPtr.Zero;
+                }
                 if (_commandPool != IntPtr.Zero)
                 {
                     VulkanDriver.DestroyCommandPool(_device, _commandPool, IntPtr.Zero);

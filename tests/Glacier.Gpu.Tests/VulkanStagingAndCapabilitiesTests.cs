@@ -54,6 +54,7 @@ public unsafe class VulkanStagingAndCapabilitiesTests(ITestOutputHelper output)
     }
 
     [Fact]
+    [Trait("Hardware", "Gpu")]
     public void VulkanContext_DetectsDiscreteVsUmaStagingAndIntegerDotProduct()
     {
         if (!VulkanDriver.IsAvailable() || !VulkanContext.IsSupported) return;
@@ -118,6 +119,7 @@ public unsafe class VulkanStagingAndCapabilitiesTests(ITestOutputHelper output)
     }
 
     [Fact]
+    [Trait("Hardware", "Gpu")]
     public void VulkanEngine_StagingUploadAndDownload_RoundtripAndMultiChunkOnDiscreteGpu()
     {
         if (!VulkanDriver.IsAvailable() || !VulkanContext.IsSupported) return;
@@ -194,6 +196,7 @@ public unsafe class VulkanStagingAndCapabilitiesTests(ITestOutputHelper output)
     }
 
     [Fact]
+    [Trait("Hardware", "Gpu")]
     public void VulkanEngine_ComputeDispatch_OnDeviceLocalStagedBuffers_ProducesExactResults()
     {
         if (!VulkanDriver.IsAvailable() || !VulkanContext.IsSupported) return;

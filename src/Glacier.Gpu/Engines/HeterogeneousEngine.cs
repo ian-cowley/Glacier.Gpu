@@ -83,7 +83,7 @@ public sealed class HeterogeneousEngine : IGpuEngine
     }
 
     /// <summary>
-    /// Simultaneously executes compute-dense SASS loops on NVIDIA dGPU and high-bandwidth memory sweeps on AMD APU.
+    /// Simultaneously executes compute-dense SASS loops on the NVIDIA dGPU and <c>hipMemcpy</c> D2D DMA bandwidth sweeps on the AMD HIP device.
     /// </summary>
     public (double nvidiaTflops, double amdBandwidthGbps, double totalMs) RunConcurrentWorkload(int nvElements = 2_097_152, int amdSizeMb = 128)
     {

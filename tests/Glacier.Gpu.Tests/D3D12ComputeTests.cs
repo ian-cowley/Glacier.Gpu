@@ -13,6 +13,7 @@ using Xunit;
 public unsafe class D3D12ComputeTests
 {
     [Fact]
+    [Trait("Hardware", "Gpu")]
     public void D3D12_CanCreateDeviceAndExecuteComputeShader()
     {
         if (!OperatingSystem.IsWindows() || !GpuEngineFactory.HasD3D12) return;
@@ -174,6 +175,7 @@ public unsafe class D3D12ComputeTests
     }
 
     [Fact]
+    [Trait("Hardware", "Gpu")]
     public void D3D12_CanCompileAndExecute_GEMV_Q4_K()
     {
         if (!OperatingSystem.IsWindows() || !GpuEngineFactory.HasD3D12) return;
@@ -369,6 +371,7 @@ public unsafe class D3D12ComputeTests
     }
 
     [Fact]
+    [Trait("Hardware", "Gpu")]
     public void D3D12ComputeEngine_Initialization_And_ZeroCopy()
     {
         if (!OperatingSystem.IsWindows() || !GpuEngineFactory.HasD3D12) return;
@@ -398,6 +401,7 @@ public unsafe class D3D12ComputeTests
     }
 
     [Fact]
+    [Trait("Hardware", "Gpu")]
     public void D3D12_HardwareWave_Capabilities_And_Wave32_Execution()
     {
         if (!OperatingSystem.IsWindows() || !GpuEngineFactory.HasD3D12) return;

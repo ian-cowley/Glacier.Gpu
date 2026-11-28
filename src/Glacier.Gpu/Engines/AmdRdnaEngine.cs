@@ -1,3 +1,8 @@
+// <copyright file="AmdRdnaEngine.cs" company="Glacier High-Performance Ecosystem">
+// Copyright (c) 2026 Ian Cowley. All rights reserved.
+// Licensed under the MIT License.
+// </copyright>
+
 using System;
 using System.Diagnostics;
 using Glacier.Gpu.Common;
@@ -7,7 +12,9 @@ namespace Glacier.Gpu.Engines;
 
 /// <summary>
 /// Hardware engine for AMD Radeon GPUs and APUs (RDNA 3.5, RDNA 3, RDNA 2).
-/// Manages true zero-copy unified system memory access without PCIe staging copies.
+/// Manages ROCm/HIP zero-copy host-mapped allocations and <c>hipMemcpy</c> DMA bandwidth diagnostics.
+/// Note: <see cref="AmdRdnaEngine"/> does not launch HIP compute kernels; use <see cref="D3D12ComputeEngine"/>
+/// or <see cref="VulkanEngine"/> for shader execution on AMD Radeon hardware.
 /// </summary>
 public sealed unsafe class AmdRdnaEngine : IGpuEngine
 {
@@ -56,13 +63,15 @@ public sealed unsafe class AmdRdnaEngine : IGpuEngine
     }
 
     /// <summary>
-    /// Allocates true zero-copy host memory mapped directly into AMD GPU compute address space.
-    /// 0 ns PCIe copy penalty.
+    /// Allocates host memory mapped into the AMD HIP device address space via <c>hipHostMalloc</c>.
     /// </summary>
     public UnifiedMemoryBlock<T> AllocateZeroCopy<T>(int count) where T : unmanaged
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        nuint bytes = (nuint)(count * sizeof(T));
+        if (count < 0)
+            throw new ArgumentOutOfRangeException(nameof(count), "Element count must be non-negative.");
+
+        nuint bytes = (nuint)(Math.Max(1, count) * sizeof(T));
 
         HipDriver.Check(HipDriver.HostMalloc(
             out IntPtr hostPtr,
@@ -70,84 +79,83 @@ public sealed unsafe class AmdRdnaEngine : IGpuEngine
             HipDriver.HIP_HOST_MALLOC_MAPPED | HipDriver.HIP_HOST_MALLOC_PORTABLE),
             "hipHostMalloc");
 
-        HipDriver.Check(HipDriver.HostGetDevicePointer(out IntPtr devPtr, hostPtr, 0), "hipHostGetDevicePointer");
+        IntPtr devPtr;
+        try
+        {
+            HipDriver.Check(HipDriver.HostGetDevicePointer(out devPtr, hostPtr, 0), "hipHostGetDevicePointer");
+        }
+        catch
+        {
+            HipDriver.HostFree(hostPtr);
+            throw;
+        }
 
         return new UnifiedMemoryBlock<T>(hostPtr, devPtr, count, p => HipDriver.HostFree(p));
     }
 
     /// <summary>
-    /// Benchmarks sustained unified memory bandwidth across the LPDDR5X memory controller.
+    /// Benchmarks <c>hipMemcpy(..., HIP_MEMCPY_DEVICE_TO_DEVICE)</c> DMA copy bandwidth from host-mapped memory
+    /// into a device allocation (does not execute compute shaders).
     /// </summary>
     public (double bandwidthGbps, double latencyMs) BenchmarkUnifiedBandwidth(int sizeMb = 256)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        if (sizeMb <= 0)
+            throw new ArgumentOutOfRangeException(nameof(sizeMb), "Buffer size in MB must be positive.");
+
         nuint sizeBytes = (nuint)sizeMb * 1024 * 1024;
+        IntPtr hostPtr = IntPtr.Zero;
+        IntPtr devOnlyPtr = IntPtr.Zero;
 
-        HipDriver.Check(HipDriver.HostMalloc(
-            out IntPtr hostPtr,
-            sizeBytes,
-            HipDriver.HIP_HOST_MALLOC_MAPPED | HipDriver.HIP_HOST_MALLOC_PORTABLE),
-            "hipHostMalloc");
-
-        HipDriver.Check(HipDriver.HostGetDevicePointer(out IntPtr devPtr, hostPtr, 0), "hipHostGetDevicePointer");
-        HipDriver.Check(HipDriver.Malloc(out IntPtr devOnlyPtr, sizeBytes), "hipMalloc");
-
-        Span<float> span = new Span<float>((void*)hostPtr, (int)(sizeBytes / sizeof(float)));
-        span.Fill(42.0f);
-
-        int iterations = 20;
-        var sw = Stopwatch.StartNew();
-        for (int i = 0; i < iterations; i++)
+        try
         {
-            HipDriver.Memcpy(devOnlyPtr, devPtr, sizeBytes, HipDriver.HIP_MEMCPY_DEVICE_TO_DEVICE);
+            HipDriver.Check(HipDriver.HostMalloc(
+                out hostPtr,
+                sizeBytes,
+                HipDriver.HIP_HOST_MALLOC_MAPPED | HipDriver.HIP_HOST_MALLOC_PORTABLE),
+                "hipHostMalloc");
+
+            HipDriver.Check(HipDriver.HostGetDevicePointer(out IntPtr devPtr, hostPtr, 0), "hipHostGetDevicePointer");
+            HipDriver.Check(HipDriver.Malloc(out devOnlyPtr, sizeBytes), "hipMalloc");
+
+            Span<float> span = new Span<float>((void*)hostPtr, (int)(sizeBytes / sizeof(float)));
+            span.Fill(42.0f);
+
+            const int iterations = 20;
+            var sw = Stopwatch.StartNew();
+            for (int i = 0; i < iterations; i++)
+            {
+                HipDriver.Check(HipDriver.Memcpy(devOnlyPtr, devPtr, sizeBytes, HipDriver.HIP_MEMCPY_DEVICE_TO_DEVICE), "hipMemcpy");
+            }
+            HipDriver.Check(HipDriver.DeviceSynchronize(), "hipDeviceSynchronize");
+            sw.Stop();
+
+            double totalSecs = sw.Elapsed.TotalSeconds;
+            double avgMs = sw.Elapsed.TotalMilliseconds / iterations;
+            double totalGb = (double)sizeBytes * iterations / (1024.0 * 1024.0 * 1024.0);
+            double gbps = totalSecs > 0 ? totalGb / totalSecs : 0.0;
+
+            return (gbps, avgMs);
         }
-        HipDriver.DeviceSynchronize();
-        sw.Stop();
-
-        double totalSecs = sw.Elapsed.TotalSeconds;
-        double avgMs = sw.Elapsed.TotalMilliseconds / iterations;
-        double totalGb = (double)sizeBytes * iterations / (1024.0 * 1024.0 * 1024.0);
-        double gbps = totalGb / totalSecs;
-
-        HipDriver.Free(devOnlyPtr);
-        HipDriver.HostFree(hostPtr);
-
-        return (gbps, avgMs);
+        finally
+        {
+            if (devOnlyPtr != IntPtr.Zero) HipDriver.Free(devOnlyPtr);
+            if (hostPtr != IntPtr.Zero) HipDriver.HostFree(hostPtr);
+        }
     }
 
     /// <summary>
-    /// Verifies zero-copy coherency and measures direct host-to-GPU sharing latency.
+    /// Unsupported legacy probe: previously wrote and read host-mapped memory purely on the CPU without executing a GPU kernel.
+    /// Always throws <see cref="NotSupportedException"/>; use <see cref="AllocateZeroCopy{T}"/> with <see cref="D3D12ComputeEngine"/>
+    /// or <see cref="VulkanEngine"/> for genuine GPU kernel execution.
     /// </summary>
+    /// <exception cref="NotSupportedException">Always thrown because no HIP compute kernel is executed.</exception>
     public (double roundTripUs, bool verified) TestZeroCopyDirectAccess()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        int N = 1024;
-        nuint bytes = (nuint)(N * sizeof(float));
-
-        HipDriver.Check(HipDriver.HostMalloc(
-            out IntPtr hostPtr,
-            bytes,
-            HipDriver.HIP_HOST_MALLOC_MAPPED),
-            "hipHostMalloc");
-
-        HipDriver.Check(HipDriver.HostGetDevicePointer(out IntPtr devPtr, hostPtr, 0), "hipHostGetDevicePointer");
-
-        float* pFloat = (float*)hostPtr;
-        for (int i = 0; i < N; i++)
-        {
-            pFloat[i] = i * 2.5f;
-        }
-
-        var sw = Stopwatch.StartNew();
-        // Verify immediate coherency: no hipMemcpy needed!
-        float sample = pFloat[10];
-        sw.Stop();
-
-        bool verified = Math.Abs(sample - 25.0f) < 0.001f;
-        double us = sw.Elapsed.TotalMicroseconds;
-
-        HipDriver.HostFree(hostPtr);
-        return (us, verified);
+        throw new NotSupportedException(
+            "TestZeroCopyDirectAccess is unsupported because host-pointer CPU writes do not exercise GPU kernel execution. " +
+            "Use AllocateZeroCopy<T>() with D3D12ComputeEngine or VulkanEngine for genuine GPU compute verification.");
     }
 
     public void Synchronize()

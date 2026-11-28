@@ -34,7 +34,8 @@ public static class NativeDriverResolver
         {
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
-                if (NativeLibrary.TryLoad("nvcuda.dll", assembly, searchPath, out IntPtr handle))
+                if (NativeLibrary.TryLoad("nvcuda.dll", assembly, searchPath ?? DllImportSearchPath.System32, out IntPtr handle) ||
+                    (searchPath is null && NativeLibrary.TryLoad("nvcuda.dll", assembly, null, out handle)))
                     return handle;
             }
             else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
@@ -67,7 +68,8 @@ public static class NativeDriverResolver
         {
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
-                if (NativeLibrary.TryLoad("vulkan-1.dll", assembly, searchPath, out IntPtr handle))
+                if (NativeLibrary.TryLoad("vulkan-1.dll", assembly, searchPath ?? DllImportSearchPath.System32, out IntPtr handle) ||
+                    (searchPath is null && NativeLibrary.TryLoad("vulkan-1.dll", assembly, null, out handle)))
                     return handle;
             }
             else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))

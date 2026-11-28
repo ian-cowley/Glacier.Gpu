@@ -28,6 +28,7 @@ public unsafe class CudaGraphExecutorTests
     }
 
     [Fact]
+    [Trait("Hardware", "Gpu")]
     public void CudaGraphExecutor_MultiKernelCaptureReplayInvalidateAndDispose_SucceedsOnRealHardware()
     {
         if (!CuDriver.IsAvailable()) return;
@@ -135,6 +136,7 @@ public unsafe class CudaGraphExecutorTests
     }
 
     [Fact]
+    [Trait("Hardware", "Gpu")]
     public void CudaGraphExecutor_MultiStreamForkJoin_CapturesAndReplaysCorrectly()
     {
         if (!CuDriver.IsAvailable()) return;
@@ -206,6 +208,7 @@ public unsafe class CudaGraphExecutorTests
     }
 
     [Fact]
+    [Trait("Hardware", "Gpu")]
     public void CudaGraphExecutor_UnsupportedCaptureOp_AutomaticallyFallsBackToDirectExecution()
     {
         if (!CuDriver.IsAvailable()) return;
@@ -271,6 +274,7 @@ public unsafe class CudaGraphExecutorTests
     }
 
     [Fact]
+    [Trait("Hardware", "Gpu")]
     public void CudaGraphExecutor_CallerOwnedStream_PreservesStreamAfterDispose()
     {
         if (!CuDriver.IsAvailable()) return;

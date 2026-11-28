@@ -1,3 +1,4 @@
+using System;
 using Glacier.Gpu.Drivers;
 using Glacier.Gpu.Engines;
 using Glacier.Gpu.Factory;
@@ -8,16 +9,41 @@ namespace Glacier.Gpu.Tests;
 public class DriverDetectionTests
 {
     [Fact]
-    public void DriverAvailability_DoesNotThrow()
+    public void DriverAvailability_ContractsAndErrorGuards_AreEnforced()
     {
-        bool hasNv = GpuEngineFactory.HasNvidiaGpu;
-        bool hasAmd = GpuEngineFactory.HasAmdGpu;
-        bool hasVk = GpuEngineFactory.HasVulkan;
+        // Probing availability must match factory properties consistently without throwing.
+        Assert.Equal(CuDriver.IsAvailable(), GpuEngineFactory.HasNvidiaGpu);
+        Assert.Equal(VulkanContext.IsSupported, GpuEngineFactory.HasVulkan);
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.False(DirectMlDriver.IsAvailable());
+            Assert.False(GpuEngineFactory.HasD3D12);
+        }
 
-        Assert.True(hasNv || hasAmd || hasVk || (!hasNv && !hasAmd && !hasVk));
+        // Canonical driver constants must match hardware/ABI specifications.
+        Assert.Equal(63, HipDriver.HIP_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT);
+        Assert.Equal(16, CuDriver.CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT);
+        Assert.Equal(75, CuDriver.CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR);
+        Assert.Equal(76, CuDriver.CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR);
+
+        // Driver error checkers must succeed on 0 and throw InvalidOperationException on non-zero status codes.
+        CuDriver.Check(0, "noop");
+        HipDriver.Check(0, "noop");
+        VulkanDriver.Check(VulkanDriver.VK_SUCCESS, "noop");
+
+        Assert.Throws<InvalidOperationException>(() => CuDriver.Check(1, "cuTestFail"));
+        Assert.Throws<InvalidOperationException>(() => HipDriver.Check(1, "hipTestFail"));
+        Assert.Throws<InvalidOperationException>(() => VulkanDriver.Check(-1, "vkTestFail"));
+
+        // Managed buffer wrappers must validate arguments before invoking native exports.
+        Assert.Throws<ArgumentNullException>(() => CuDriver.DeviceGetName((byte[])null!, 16, 0));
+        Assert.Throws<ArgumentOutOfRangeException>(() => CuDriver.DeviceGetName(new byte[8], -1, 0));
+        Assert.Throws<ArgumentNullException>(() => HipDriver.DeviceGetName((byte[])null!, 16, 0));
+        Assert.Throws<ArgumentOutOfRangeException>(() => HipDriver.DeviceGetName(new byte[8], -1, 0));
     }
 
     [Fact]
+    [Trait("Hardware", "Gpu")]
     public void NvidiaDriver_QueriesComputeCapability()
     {
         if (!CuDriver.IsAvailable()) return;
@@ -37,6 +63,7 @@ public class DriverDetectionTests
     }
 
     [Fact]
+    [Trait("Hardware", "Gpu")]
     public void AmdDriver_QueriesDeviceName()
     {
         if (!HipDriver.IsAvailable()) return;
@@ -50,37 +77,39 @@ public class DriverDetectionTests
     }
 
     [Fact]
+    [Trait("Hardware", "Gpu")]
     public void DirectMlDriver_DoesNotThrowAndDetectsAdapters()
     {
-        bool hasDml = DirectMlDriver.IsAvailable();
-        Assert.True(hasDml || !hasDml);
-
-        if (hasDml)
+        if (!OperatingSystem.IsWindows())
         {
-            var adapters = DirectMlDriver.GetAdapters();
-            foreach (var a in adapters)
-            {
-                Assert.False(string.IsNullOrWhiteSpace(a.Description));
-                Assert.True(a.VendorId > 0);
-            }
+            Assert.False(DirectMlDriver.IsAvailable());
+            return;
+        }
+
+        if (!DirectMlDriver.IsAvailable()) return;
+
+        var adapters = DirectMlDriver.GetAdapters();
+        Assert.NotEmpty(adapters);
+        foreach (var a in adapters)
+        {
+            Assert.False(string.IsNullOrWhiteSpace(a.Description));
+            Assert.True(a.VendorId > 0);
         }
     }
 
     [Fact]
+    [Trait("Hardware", "Gpu")]
     public void VulkanDriver_DoesNotThrowAndDetectsDevices()
     {
-        bool hasVulkan = VulkanDriver.IsAvailable();
-        Assert.True(hasVulkan || !hasVulkan);
+        if (!VulkanDriver.IsAvailable() || !VulkanContext.IsSupported) return;
 
-        if (hasVulkan && VulkanContext.IsSupported)
-        {
-            using var engine = new VulkanEngine();
-            engine.Initialize();
+        using var engine = new VulkanEngine();
+        engine.Initialize();
 
-            Assert.True(engine.IsInitialized);
-            Assert.False(string.IsNullOrWhiteSpace(engine.DeviceInfo.DeviceName));
-            Assert.True(engine.DeviceInfo.TotalMemoryBytes > 0);
-        }
+        Assert.True(engine.IsInitialized);
+        Assert.False(string.IsNullOrWhiteSpace(engine.DeviceInfo.DeviceName));
+        Assert.True(engine.DeviceInfo.TotalMemoryBytes > 0);
+        Assert.NotEqual(IntPtr.Zero, engine.Context.QueueFenceHandle);
     }
 
     [Theory]

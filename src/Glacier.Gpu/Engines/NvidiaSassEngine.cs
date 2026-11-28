@@ -26,6 +26,7 @@ public sealed unsafe class NvidiaSassEngine : IGpuEngine
     private PersistentRingBuffer? _ringBuffer;
     private IntPtr _hostTaskPtr;
     private IntPtr _devTaskPtr;
+    private IntPtr _devSyncPtr;
     private GpuDeviceInfo? _deviceInfo;
     private bool _initialized;
     private bool _disposed;
@@ -54,8 +55,8 @@ public sealed unsafe class NvidiaSassEngine : IGpuEngine
         string arch = CuDriver.GetComputeCapability(dev);
         int smCount = CuDriver.GetMultiprocessorCount(dev);
         CuDriver.Check(CuDriver.DeviceTotalMem(out nuint totalMem, dev), "cuDeviceTotalMem");
-        CuDriver.DeviceGetAttribute(out int ccMajor, 75, dev);
-        CuDriver.DeviceGetAttribute(out int ccMinor, 76, dev);
+        CuDriver.DeviceGetAttribute(out int ccMajor, CuDriver.CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, dev);
+        CuDriver.DeviceGetAttribute(out int ccMinor, CuDriver.CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, dev);
         bool supportsDp4a = ccMajor > 6 || (ccMajor == 6 && ccMinor >= 1);
 
         _deviceInfo = new GpuDeviceInfo(
@@ -76,7 +77,7 @@ public sealed unsafe class NvidiaSassEngine : IGpuEngine
         // Load or JIT compile kernels
         byte[] cubinAdd = KernelCache.GetOrCompile(arch, "VectorAdd", KernelSources.VectorAddPtx);
         byte[] cubinFma = KernelCache.GetOrCompile(arch, "VectorFma", KernelSources.VectorFmaPtx);
-        byte[] cubinWorker = KernelCache.GetOrCompile(arch, "PersistentWorker_v2", KernelSources.PersistentWorkerPtx);
+        byte[] cubinWorker = KernelCache.GetOrCompile(arch, "PersistentWorker_v3", KernelSources.PersistentWorkerPtx);
 
         CuDriver.Check(CuDriver.ModuleLoadData(out _modAdd, cubinAdd), "cuModuleLoadData(VectorAdd)");
         CuDriver.Check(CuDriver.ModuleGetFunction(out _fnVectorAdd, _modAdd, "vector_add"), "cuModuleGetFunction(vector_add)");
@@ -179,6 +180,8 @@ public sealed unsafe class NvidiaSassEngine : IGpuEngine
             CuDriver.CU_MEMHOSTALLOC_DEVICEMAP | CuDriver.CU_MEMHOSTALLOC_PORTABLE),
             "cuMemHostAlloc");
         CuDriver.Check(CuDriver.MemHostGetDevicePointer(out _devTaskPtr, _hostTaskPtr, 0), "cuMemHostGetDevicePointer");
+        CuDriver.Check(CuDriver.MemAlloc(out _devSyncPtr, 8), "cuMemAlloc(sync)");
+        CuDriver.Check(CuDriver.MemsetD8(_devSyncPtr, 0, 8), "cuMemsetD8(sync)");
         CuDriver.Check(CuDriver.StreamCreate(out _workerStream, CuDriver.CU_STREAM_NON_BLOCKING), "cuStreamCreate(non-blocking)");
 
         _ringBuffer = new PersistentRingBuffer(
@@ -203,6 +206,11 @@ public sealed unsafe class NvidiaSassEngine : IGpuEngine
                         CuDriver.StreamDestroy(_workerStream);
                         _workerStream = IntPtr.Zero;
                     }
+                    if (_devSyncPtr != IntPtr.Zero)
+                    {
+                        CuDriver.MemFree(_devSyncPtr);
+                        _devSyncPtr = IntPtr.Zero;
+                    }
                     if (_hostTaskPtr != IntPtr.Zero)
                     {
                         CuDriver.MemFreeHost(_hostTaskPtr);
@@ -213,15 +221,20 @@ public sealed unsafe class NvidiaSassEngine : IGpuEngine
                 _ringBuffer = null;
             });
 
+        int smCount = Math.Max(1, _deviceInfo?.ComputeUnitsOrSms > 0
+            ? _deviceInfo.ComputeUnitsOrSms
+            : CuDriver.GetMultiprocessorCount(_device));
         IntPtr devTask = _devTaskPtr;
         uint ringMask = DefaultRingCapacity - 1;
-        void** launchParams = stackalloc void*[2];
+        IntPtr devSync = _devSyncPtr;
+        void** launchParams = stackalloc void*[3];
         launchParams[0] = &devTask;
         launchParams[1] = &ringMask;
+        launchParams[2] = &devSync;
 
         CuDriver.Check(CuDriver.LaunchKernel(
             _fnWorker,
-            1, 1, 1,
+            (uint)smCount, 1, 1,
             (uint)actualThreads, 1, 1,
             0, _workerStream,
             (IntPtr)launchParams,
@@ -416,6 +429,11 @@ public sealed unsafe class NvidiaSassEngine : IGpuEngine
                 {
                     CuDriver.StreamDestroy(_workerStream);
                     _workerStream = IntPtr.Zero;
+                }
+                if (_devSyncPtr != IntPtr.Zero)
+                {
+                    CuDriver.MemFree(_devSyncPtr);
+                    _devSyncPtr = IntPtr.Zero;
                 }
                 if (_hostTaskPtr != IntPtr.Zero)
                 {

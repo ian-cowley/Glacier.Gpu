@@ -65,6 +65,10 @@ public sealed unsafe class PersistentRingBuffer : IDisposable
     public uint Enqueue(TaskOpCode opCode, uint elementCount, ulong bufA, ulong bufB, ulong bufC, float scalar = 0f, int timeoutMs = 5000)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        if (opCode is not (TaskOpCode.Nop or TaskOpCode.VectorAdd or TaskOpCode.VectorFma or TaskOpCode.Shutdown))
+        {
+            throw new NotSupportedException($"TaskOpCode.{opCode} is not implemented by the persistent GPU worker kernel.");
+        }
 
         // Poison-free CAS reservation: verify slot turn readiness and completion BEFORE advancing _sequenceCounter
         var spinner = new SpinWait();

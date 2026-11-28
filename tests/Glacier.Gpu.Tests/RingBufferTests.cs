@@ -27,6 +27,7 @@ public class RingBufferTests
     }
 
     [Fact]
+    [Trait("Hardware", "Gpu")]
     public void PersistentRingBuffer_ExecutesTasksWithZeroAllocation()
     {
         if (!CuDriver.IsAvailable()) return;
@@ -46,6 +47,7 @@ public class RingBufferTests
     }
 
     [Fact]
+    [Trait("Hardware", "Gpu")]
     public unsafe void PersistentRingBuffer_CudaMultiSlotWrapAround_CompletesOver140Tasks()
     {
         if (!CuDriver.IsAvailable()) return;
@@ -96,6 +98,7 @@ public class RingBufferTests
     }
 
     [Theory]
+    [Trait("Hardware", "Gpu")]
     [InlineData(100_000)]
     [InlineData(1_000_000)]
     public void PersistentRingBuffer_GridStrideLoop_ComputesLargeVectorsCorrectly(int elementCount)
@@ -114,6 +117,7 @@ public class RingBufferTests
     }
 
     [Fact]
+    [Trait("Hardware", "Gpu")]
     public void D3D12_CommandListDispatch_ReportsNoPersistentRingSupport_AndExecutesCorrectly()
     {
         if (!OperatingSystem.IsWindows() || !GpuEngineFactory.HasD3D12) return;

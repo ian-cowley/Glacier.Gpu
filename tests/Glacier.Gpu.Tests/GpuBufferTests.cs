@@ -66,6 +66,7 @@ public class GpuBufferTests
     }
 
     [Fact]
+    [Trait("Hardware", "Gpu")]
     public void GpuBuffer_Cuda_AllocateUploadDownloadRoundtrip()
     {
         if (!CuDriver.IsAvailable()) return;
@@ -97,6 +98,7 @@ public class GpuBufferTests
     }
 
     [Fact]
+    [Trait("Hardware", "Gpu")]
     public void GpuBuffer_Cuda_DeviceToDeviceCopy()
     {
         if (!CuDriver.IsAvailable()) return;
@@ -126,6 +128,7 @@ public class GpuBufferTests
     }
 
     [Fact]
+    [Trait("Hardware", "Gpu")]
     public void GpuBuffer_D3D12_AllocateCommittedResource()
     {
         if (!OperatingSystem.IsWindows()) return;

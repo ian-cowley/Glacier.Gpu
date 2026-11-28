@@ -1,3 +1,8 @@
+// <copyright file="HipDriver.cs" company="Glacier High-Performance Ecosystem">
+// Copyright (c) 2026 Ian Cowley. All rights reserved.
+// Licensed under the MIT License.
+// </copyright>
+
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -8,7 +13,7 @@ namespace Glacier.Gpu.Drivers;
 /// Direct P/Invoke bindings for the AMD HIP Driver API (amdhip64.dll / libamdhip64.so).
 /// Native ROCm / HIP user-mode driver for Radeon GPUs and APUs with blittable Native AOT signatures.
 /// </summary>
-public static unsafe class HipDriver
+public static unsafe partial class HipDriver
 {
     private const string HipLib = "amdhip64.dll";
 
@@ -21,6 +26,12 @@ public static unsafe class HipDriver
     public const int HIP_MEMCPY_HOST_TO_DEVICE = 1;
     public const int HIP_MEMCPY_DEVICE_TO_HOST = 2;
     public const int HIP_MEMCPY_DEVICE_TO_DEVICE = 3;
+
+    /// <summary>ROCm HIP device attribute: number of multiprocessors / compute units (<c>hipDeviceAttributeMultiprocessorCount</c>).</summary>
+    public const int HIP_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT = 63;
+
+    public const int HIP_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR = 75;
+    public const int HIP_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR = 76;
 
     static HipDriver()
     {
@@ -61,18 +72,19 @@ public static unsafe class HipDriver
 
     public static bool IsAvailable() => _isAvailable.Value;
 
-    [DllImport(HipLib, EntryPoint = "hipInit")]
-    public static extern int Init(uint flags);
+    [LibraryImport(HipLib, EntryPoint = "hipInit")]
+    public static partial int Init(uint flags);
 
-    [DllImport(HipLib, EntryPoint = "hipGetDeviceCount")]
-    public static extern int GetDeviceCount(out int count);
+    [LibraryImport(HipLib, EntryPoint = "hipGetDeviceCount")]
+    public static partial int GetDeviceCount(out int count);
 
-    [DllImport(HipLib, EntryPoint = "hipDeviceGetName")]
-    public static extern int DeviceGetName(byte* name, int len, int dev);
+    [LibraryImport(HipLib, EntryPoint = "hipDeviceGetName")]
+    public static partial int DeviceGetName(byte* name, int len, int dev);
 
     public static int DeviceGetName(byte[] name, int len, int dev)
     {
         ArgumentNullException.ThrowIfNull(name);
+        ArgumentOutOfRangeException.ThrowIfNegative(len);
         int safeLen = Math.Min(len, name.Length);
         fixed (byte* pName = name)
         {
@@ -80,54 +92,51 @@ public static unsafe class HipDriver
         }
     }
 
-    [DllImport(HipLib, EntryPoint = "hipSetDevice")]
-    public static extern int SetDevice(int device);
+    [LibraryImport(HipLib, EntryPoint = "hipSetDevice")]
+    public static partial int SetDevice(int device);
 
-    [DllImport(HipLib, EntryPoint = "hipDeviceSynchronize")]
-    public static extern int DeviceSynchronize();
+    [LibraryImport(HipLib, EntryPoint = "hipDeviceSynchronize")]
+    public static partial int DeviceSynchronize();
 
-    [DllImport(HipLib, EntryPoint = "hipMalloc")]
-    public static extern int Malloc(out IntPtr dptr, nuint size);
+    [LibraryImport(HipLib, EntryPoint = "hipMalloc")]
+    public static partial int Malloc(out IntPtr dptr, nuint size);
 
-    [DllImport(HipLib, EntryPoint = "hipFree")]
-    public static extern int Free(IntPtr dptr);
+    [LibraryImport(HipLib, EntryPoint = "hipFree")]
+    public static partial int Free(IntPtr dptr);
 
-    [DllImport(HipLib, EntryPoint = "hipHostMalloc")]
-    public static extern int HostMalloc(out IntPtr pptr, nuint size, uint flags);
+    [LibraryImport(HipLib, EntryPoint = "hipHostMalloc")]
+    public static partial int HostMalloc(out IntPtr pptr, nuint size, uint flags);
 
-    [DllImport(HipLib, EntryPoint = "hipHostFree")]
-    public static extern int HostFree(IntPtr ptr);
+    [LibraryImport(HipLib, EntryPoint = "hipHostFree")]
+    public static partial int HostFree(IntPtr ptr);
 
-    [DllImport(HipLib, EntryPoint = "hipHostGetDevicePointer")]
-    public static extern int HostGetDevicePointer(out IntPtr devPtr, IntPtr hostPtr, uint flags);
+    [LibraryImport(HipLib, EntryPoint = "hipHostGetDevicePointer")]
+    public static partial int HostGetDevicePointer(out IntPtr devPtr, IntPtr hostPtr, uint flags);
 
-    [DllImport(HipLib, EntryPoint = "hipMemcpy")]
-    public static extern int Memcpy(IntPtr dst, IntPtr src, nuint size, int kind);
+    [LibraryImport(HipLib, EntryPoint = "hipMemcpy")]
+    public static partial int Memcpy(IntPtr dst, IntPtr src, nuint size, int kind);
 
-    [DllImport(HipLib, EntryPoint = "hipStreamCreate")]
-    public static extern int StreamCreate(out IntPtr pStream);
+    [LibraryImport(HipLib, EntryPoint = "hipStreamCreate")]
+    public static partial int StreamCreate(out IntPtr pStream);
 
-    [DllImport(HipLib, EntryPoint = "hipStreamSynchronize")]
-    public static extern int StreamSynchronize(IntPtr stream);
+    [LibraryImport(HipLib, EntryPoint = "hipStreamSynchronize")]
+    public static partial int StreamSynchronize(IntPtr stream);
 
-    [DllImport(HipLib, EntryPoint = "hipStreamDestroy")]
-    public static extern int StreamDestroy(IntPtr stream);
+    [LibraryImport(HipLib, EntryPoint = "hipStreamDestroy")]
+    public static partial int StreamDestroy(IntPtr stream);
 
-    [DllImport(HipLib, EntryPoint = "hipDeviceGetAttribute")]
-    public static extern int DeviceGetAttribute(out int pi, int attr, int device);
+    [LibraryImport(HipLib, EntryPoint = "hipDeviceGetAttribute")]
+    public static partial int DeviceGetAttribute(out int pi, int attr, int device);
 
-    [DllImport(HipLib, EntryPoint = "hipDeviceTotalMem")]
-    public static extern int DeviceTotalMem(out nuint bytes, int device);
-
-    public const int HIP_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT = 16;
-    public const int HIP_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR = 75;
-    public const int HIP_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR = 76;
+    [LibraryImport(HipLib, EntryPoint = "hipDeviceTotalMem")]
+    public static partial int DeviceTotalMem(out nuint bytes, int device);
 
     public static string GetDeviceName(int device)
     {
         byte* buf = stackalloc byte[256];
         NativeMemory.Clear(buf, 256);
-        DeviceGetName(buf, 256, device);
+        int res = DeviceGetName(buf, 256, device);
+        Check(res, nameof(DeviceGetName));
         int len = 0;
         while (len < 256 && buf[len] != 0) len++;
         return Encoding.ASCII.GetString(buf, len);
@@ -135,14 +144,19 @@ public static unsafe class HipDriver
 
     public static int GetMultiprocessorCount(int device)
     {
-        try
-        {
-            if (DeviceGetAttribute(out int count, HIP_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, device) == 0 && count > 0)
-                return count;
-        }
-        catch { }
+        int res = DeviceGetAttribute(out int count, HIP_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, device);
+        if (res == 0 && count > 0)
+            return count;
 
-        string name = GetDeviceName(device).ToLowerInvariant();
+        // Only fall back when the driver returns a non-zero status for hipDeviceAttributeMultiprocessorCount (63).
+        byte* buf = stackalloc byte[256];
+        NativeMemory.Clear(buf, 256);
+        if (DeviceGetName(buf, 256, device) != 0)
+            return 0;
+
+        int len = 0;
+        while (len < 256 && buf[len] != 0) len++;
+        string name = Encoding.ASCII.GetString(buf, len).ToLowerInvariant();
         if (name.Contains("890m")) return 16;
         if (name.Contains("880m") || name.Contains("780m") || name.Contains("680m")) return 12;
         if (name.Contains("760m")) return 8;
@@ -158,13 +172,7 @@ public static unsafe class HipDriver
 
     public static nuint GetTotalMemory(int device)
     {
-        try
-        {
-            if (DeviceTotalMem(out nuint mem, device) == 0 && mem > 0)
-                return mem;
-        }
-        catch { }
-        return 0;
+        return DeviceTotalMem(out nuint mem, device) == 0 && mem > 0 ? mem : 0;
     }
 
     public static void Check(int res, string op)

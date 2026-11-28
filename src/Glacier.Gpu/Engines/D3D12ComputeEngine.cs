@@ -454,6 +454,177 @@ public sealed unsafe class D3D12ComputeEngine : IGpuEngine
         return (dispatchUs, roundTripUs, verified, sampleVal);
     }
 
+    /// <summary>
+    /// Compiles an HLSL compute shader (<paramref name="shaderProfile"/>, default <c>cs_5_0</c>) and dispatches it
+    /// against arbitrary <c>RWStructuredBuffer&lt;T&gt;</c> UAV resources (<c>u0..uN</c>) and optional 32-bit root constants (<c>b0</c>).
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public void DispatchHlsl(
+        string hlslSource,
+        string entryPoint,
+        ReadOnlySpan<ID3D12Resource> uavBuffers,
+        uint groupCountX,
+        uint groupCountY = 1,
+        uint groupCountZ = 1,
+        ReadOnlySpan<uint> rootConstants = default,
+        string shaderProfile = "cs_5_0")
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentException.ThrowIfNullOrWhiteSpace(hlslSource);
+        ArgumentException.ThrowIfNullOrWhiteSpace(entryPoint);
+        ArgumentException.ThrowIfNullOrWhiteSpace(shaderProfile);
+
+        ReadOnlyMemory<byte> blob = Compiler.Compile(hlslSource, entryPoint, "glacier_compute.hlsl", shaderProfile);
+        if (blob.IsEmpty)
+            throw new InvalidOperationException("HLSL shader compilation produced an empty bytecode blob.");
+
+        DispatchPrecompiledShader(blob.Span, uavBuffers, groupCountX, groupCountY, groupCountZ, rootConstants);
+    }
+
+    /// <summary>
+    /// Dispatches a precompiled DXBC/DXIL compute shader bytecode blob against arbitrary <c>RWStructuredBuffer&lt;T&gt;</c>
+    /// UAV resources (<c>u0..uN</c>) and optional 32-bit root constants (<c>b0</c>), then fence-synchronizes completion.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public void DispatchPrecompiledShader(
+        ReadOnlySpan<byte> shaderBytecode,
+        ReadOnlySpan<ID3D12Resource> uavBuffers,
+        uint groupCountX,
+        uint groupCountY = 1,
+        uint groupCountZ = 1,
+        ReadOnlySpan<uint> rootConstants = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_device == null || _queue == null || _cmdList == null || _cmdAlloc == null)
+            throw new InvalidOperationException("Device not initialized.");
+        if (shaderBytecode.IsEmpty)
+            throw new ArgumentException("Shader bytecode cannot be empty.", nameof(shaderBytecode));
+        if (groupCountX == 0 || groupCountY == 0 || groupCountZ == 0)
+            throw new ArgumentOutOfRangeException(nameof(groupCountX), "Dispatch workgroup dimensions must be >= 1.");
+
+        int rootParamCount = (rootConstants.IsEmpty ? 0 : 1) + uavBuffers.Length;
+        var rootParams = new RootParameter[rootParamCount];
+        int pIdx = 0;
+        if (!rootConstants.IsEmpty)
+        {
+            rootParams[pIdx++] = new RootParameter(new RootConstants(0, 0, (uint)rootConstants.Length), ShaderVisibility.All);
+        }
+
+        for (uint i = 0; i < (uint)uavBuffers.Length; i++)
+        {
+            ArgumentNullException.ThrowIfNull(uavBuffers[(int)i], nameof(uavBuffers));
+            rootParams[pIdx++] = new RootParameter(RootParameterType.UnorderedAccessView, new RootDescriptor(i, 0), ShaderVisibility.All);
+        }
+
+        using var rootSig = _device.CreateRootSignature(new RootSignatureDescription(RootSignatureFlags.None, rootParams), RootSignatureVersion.Version1);
+        byte[] bytecodeCopy = shaderBytecode.ToArray();
+        using var pso = _device.CreateComputePipelineState(new ComputePipelineStateDescription
+        {
+            RootSignature = rootSig,
+            ComputeShader = bytecodeCopy
+        });
+
+        _cmdAlloc.Reset();
+        _cmdList.Reset(_cmdAlloc, pso);
+        _cmdList.SetComputeRootSignature(rootSig);
+
+        uint slot = 0;
+        if (!rootConstants.IsEmpty)
+        {
+            fixed (uint* pConsts = rootConstants)
+            {
+                _cmdList.SetComputeRoot32BitConstants(slot++, (uint)rootConstants.Length, (IntPtr)pConsts, 0);
+            }
+        }
+
+        for (int i = 0; i < uavBuffers.Length; i++)
+        {
+            _cmdList.SetComputeRootUnorderedAccessView(slot++, uavBuffers[i].GPUVirtualAddress);
+        }
+
+        _cmdList.Dispatch(groupCountX, groupCountY, groupCountZ);
+        for (int i = 0; i < uavBuffers.Length; i++)
+        {
+            _cmdList.ResourceBarrierUnorderedAccessView(uavBuffers[i]);
+        }
+
+        _cmdList.Close();
+        _queue.ExecuteCommandList(_cmdList);
+        SynchronizeWindows();
+    }
+
+    /// <summary>
+    /// Uploads host span data into a default-heap <see cref="ID3D12Resource"/> buffer using a transient upload heap copy.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public void UploadBuffer<T>(ID3D12Resource destination, ReadOnlySpan<T> data) where T : unmanaged
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(destination);
+        if (_device == null || _queue == null || _cmdList == null || _cmdAlloc == null)
+            throw new InvalidOperationException("Device not initialized.");
+        if (data.IsEmpty) return;
+
+        ulong bytes = (ulong)data.Length * (ulong)sizeof(T);
+        using var upload = _device.CreateCommittedResource(
+            new HeapProperties(HeapType.Upload), HeapFlags.None,
+            ResourceDescription.Buffer(bytes), ResourceStates.GenericRead);
+
+        void* pMapped = null;
+        upload.Map(0, null, &pMapped);
+        fixed (T* pSrc = data)
+        {
+            Buffer.MemoryCopy(pSrc, pMapped, bytes, bytes);
+        }
+        upload.Unmap(0);
+
+        _cmdAlloc.Reset();
+        _cmdList.Reset(_cmdAlloc, null);
+        _cmdList.CopyBufferRegion(destination, 0, upload, 0, bytes);
+        _cmdList.Close();
+        _queue.ExecuteCommandList(_cmdList);
+        SynchronizeWindows();
+    }
+
+    /// <summary>
+    /// Downloads data from a default-heap <see cref="ID3D12Resource"/> buffer into host memory via a transient readback heap.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public void DownloadBuffer<T>(ID3D12Resource source, Span<T> destination) where T : unmanaged
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(source);
+        if (_device == null || _queue == null || _cmdList == null || _cmdAlloc == null)
+            throw new InvalidOperationException("Device not initialized.");
+        if (destination.IsEmpty) return;
+
+        ulong bytes = (ulong)destination.Length * (ulong)sizeof(T);
+        using var readback = _device.CreateCommittedResource(
+            new HeapProperties(HeapType.Readback), HeapFlags.None,
+            ResourceDescription.Buffer(bytes), ResourceStates.CopyDest);
+
+        _cmdAlloc.Reset();
+        _cmdList.Reset(_cmdAlloc, null);
+        _cmdList.ResourceBarrierTransition(source, ResourceStates.Common, ResourceStates.CopySource);
+        _cmdList.CopyBufferRegion(readback, 0, source, 0, bytes);
+        _cmdList.ResourceBarrierTransition(source, ResourceStates.CopySource, ResourceStates.Common);
+        _cmdList.Close();
+        _queue.ExecuteCommandList(_cmdList);
+        SynchronizeWindows();
+
+        void* pRead = null;
+        readback.Map(0, null, &pRead);
+        fixed (T* pDst = destination)
+        {
+            Buffer.MemoryCopy(pRead, pDst, bytes, bytes);
+        }
+        readback.Unmap(0);
+    }
+
     public void Synchronize()
     {
         if (!OperatingSystem.IsWindows() || _disposed) return;

@@ -35,6 +35,7 @@ public class UnifiedMemoryTests
     }
 
     [Fact]
+    [Trait("Hardware", "Gpu")]
     public void AmdZeroCopy_MapsHostMemoryDirectly()
     {
         if (!HipDriver.IsAvailable()) return;
