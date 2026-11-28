@@ -113,13 +113,17 @@ public static class KernelCompiler
                 }
                 else
                 {
-                    try { proc.Kill(entireProcessTree: true); } catch { }
+                    try { proc.Kill(entireProcessTree: true); }
+                    catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException)
+                    {
+                        System.Diagnostics.Trace.TraceWarning($"[KernelCompiler] Failed to terminate ptxas process: {ex.Message}");
+                    }
                 }
             }
         }
-        catch
+        catch (Exception ex) when (ex is InvalidOperationException or IOException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
         {
-            // Fall back cleanly to CUDA driver JIT via cuModuleLoadData
+            System.Diagnostics.Trace.TraceWarning($"[KernelCompiler] Offline ptxas compilation failed, falling back to driver JIT: {ex.Message}");
         }
         finally
         {
@@ -127,7 +131,10 @@ public static class KernelCompiler
             {
                 if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true);
             }
-            catch { }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                System.Diagnostics.Trace.TraceWarning($"[KernelCompiler] Temp directory cleanup warning for '{tempDir}': {ex.Message}");
+            }
         }
 
         return Encoding.UTF8.GetBytes(ptxCode + "\0");

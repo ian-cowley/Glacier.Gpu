@@ -28,7 +28,10 @@ public static class GpuEngineFactory
                 het.Initialize();
                 return het;
             }
-            catch { }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.TraceWarning($"[GpuEngineFactory] HeterogeneousEngine unavailable, falling back: {ex.Message}");
+            }
         }
 
         if (HasNvidiaGpu)
@@ -60,7 +63,10 @@ public static class GpuEngineFactory
                 vk.Initialize();
                 return vk;
             }
-            catch { }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.TraceWarning($"[GpuEngineFactory] VulkanEngine unavailable, falling back: {ex.Message}");
+            }
         }
 
         if (HasD3D12)
@@ -98,7 +104,10 @@ public static class GpuEngineFactory
                 d3d.Initialize();
                 return d3d;
             }
-            catch { }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.TraceWarning($"[GpuEngineFactory] AMD D3D12ComputeEngine unavailable, falling back: {ex.Message}");
+            }
         }
 
         if (HipDriver.IsAvailable())
@@ -109,7 +118,10 @@ public static class GpuEngineFactory
                 amd.Initialize();
                 return amd;
             }
-            catch { }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.TraceWarning($"[GpuEngineFactory] AmdRdnaEngine unavailable, falling back: {ex.Message}");
+            }
         }
 
         return null;
@@ -179,7 +191,10 @@ public static class GpuEngineFactory
                     }
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.TraceWarning($"[GpuEngineFactory] Intel D3D12ComputeEngine unavailable, falling back: {ex.Message}");
+            }
         }
 
         return TryCreateVulkanEngine();

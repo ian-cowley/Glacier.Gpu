@@ -664,7 +664,11 @@ public sealed unsafe class D3D12ComputeEngine : IGpuEngine
     [MethodImpl(MethodImplOptions.NoInlining)]
     private void DisposeWindows()
     {
-        try { SynchronizeWindows(); } catch { }
+        try { SynchronizeWindows(); }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Trace.TraceWarning($"[D3D12ComputeEngine] Synchronize during dispose warning: {ex.Message}");
+        }
 
         _psoVecAdd?.Dispose();
         _psoVecFma?.Dispose();

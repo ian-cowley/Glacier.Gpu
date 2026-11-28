@@ -187,7 +187,11 @@ public sealed unsafe class PersistentRingBuffer : IDisposable
             }
             else if (CuDriver.IsAvailable())
             {
-                try { CuDriver.CtxSynchronize(); } catch { }
+                try { CuDriver.CtxSynchronize(); }
+                catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException or InvalidOperationException or System.Runtime.InteropServices.ExternalException)
+                {
+                    System.Diagnostics.Trace.TraceWarning($"[PersistentRingBuffer] CtxSynchronize warning during shutdown: {ex.Message}");
+                }
             }
         }
     }
@@ -204,7 +208,11 @@ public sealed unsafe class PersistentRingBuffer : IDisposable
             }
             else if (_hostTaskPtr != IntPtr.Zero && CuDriver.IsAvailable())
             {
-                try { CuDriver.MemFreeHost(_hostTaskPtr); } catch { }
+                try { CuDriver.MemFreeHost(_hostTaskPtr); }
+                catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException or InvalidOperationException or System.Runtime.InteropServices.ExternalException)
+                {
+                    System.Diagnostics.Trace.TraceWarning($"[PersistentRingBuffer] MemFreeHost warning during dispose: {ex.Message}");
+                }
             }
             _hostTaskPtr = IntPtr.Zero;
             _devTaskPtr = IntPtr.Zero;
